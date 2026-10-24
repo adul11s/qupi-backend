@@ -1,0 +1,25 @@
+name: CI
+on:
+  push: { branches: ["*"] }
+  pull_request: { branches: ["*"] }
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: 'npm' }
+      - run: npm ci
+      - name: prisma validate
+        run: npx prisma validate
+        env: { DATABASE_URL: 'postgresql://qupi:qupi@localhost:5432/qupi?schema=public' }
+      - name: prisma generate
+        run: npx prisma generate
+        env: { DATABASE_URL: 'postgresql://qupi:qupi@localhost:5432/qupi?schema=public' }
+      - name: lint
+        run: npm run lint
+      - name: build
+        run: npm run build
+      - name: test
+        run: npm test
+        env: { DATABASE_URL: 'postgresql://qupi:qupi@localhost:5432/qupi?schema=public' }

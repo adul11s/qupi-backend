@@ -313,6 +313,8 @@ describe('Integrasi Postgres: alur uang kritis', () => {
       s403: statuses.filter((s) => s === 403).length, s400: statuses.filter((s) => s === 400).length,
     }));
     const r403 = results.filter((r) => r.status === 'fulfilled' && (r.value as ApiRes).status === 403)[0] as { value?: ApiRes } | undefined;
+    const r500 = results.filter((r) => r.status === 'fulfilled' && (r.value as ApiRes).status === 500)[0] as { value?: ApiRes } | undefined;
+    console.log('CONC_BODY500', JSON.stringify(r500?.value?.json));
     console.log('CONC_BODY403', JSON.stringify(r403?.value?.json));
     expect(statuses.filter((s) => s === 201).length).toBe(20);
     expect(statuses.filter((s) => s === 409).length).toBe(30); // INSUFFICIENT_BALANCE → 409 CONFLICT

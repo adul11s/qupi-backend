@@ -84,14 +84,19 @@ export class InMemoryWalletStore implements WalletStore {
     creditAmount: number,
   ) {
     const out: { accountId: string; direction: 'DEBIT' | 'CREDIT'; amount: number }[] = [];
-    for (const d of debits) {
-      this.entries.push({ accountId: d.accountId, transactionId: txId, direction: 'DEBIT', amount: d.amount, kind: '', status: 'SUCCESS', createdAt: new Date() });
-      out.push({ accountId: d.accountId, direction: 'DEBIT' as const, amount: d.amount });
-    }
-    for (const accountId of credits) {
-      this.entries.push({ accountId, transactionId: txId, direction: 'CREDIT', amount: creditAmount, kind: '', status: 'SUCCESS', createdAt: new Date() });
-      out.push({ accountId, direction: 'CREDIT' as const, amount: creditAmount });
-    }
+    const push = (accountId: string, direction: 'DEBIT' | 'CREDIT', amount: number) => {
+      this.entries.push({ accountId, transactionId: txId, direction, amount, kind: '', status: 'SUCCESS', createdAt: new Date() });
+      out.push({ accountId, direction, amount });
+    };
+    // Invariant universal: Σdebit == Σkredit untuk SEMUA transaksi.
+    // Dana keluar tanpa kredit → kredit virtual payout-clearing;
+    // dana masuk tanpa debit → debit virtual funding-suspense.
+    const debitTotal = debits.reduce((a, d) => a + d.amount, 0);
+    const creditTotal = credits.length * creditAmount;
+    if (debitTotal > creditTotal) push('virtual:external-payout-clearing', 'CREDIT', debitTotal - creditTotal);
+    if (creditTotal > debitTotal) push('virtual:external-funding-suspense', 'DEBIT', creditTotal - debitTotal);
+    for (const d of debits) push(d.accountId, 'DEBIT', d.amount);
+    for (const accountId of credits) push(accountId, 'CREDIT', creditAmount);
     return out;
   }
 

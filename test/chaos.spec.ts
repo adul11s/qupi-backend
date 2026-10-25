@@ -47,7 +47,7 @@ describe('Chaos: webhook ganda (double delivery)', () => {
   it('callback SUCCESS dua kali sebelum settle? saldo masuk tepat satu kali', async () => {
     const store = new InMemoryWalletStore();
     const svc = new WalletService(store, stubQueue());
-    const t1 = await svc.topupBki('acc-a', 100_000, 'chaos-topup-2'); // BKI success
+    const _t1 = await svc.topupBki('acc-a', 100_000, 'chaos-topup-2'); // BKI success
     const t2 = await svc.topupBki('acc-b', 200_000, 'chaos-topup-3');
     const tid = (t2.data as unknown as { id: string }).id;
     // callback kedua datang telat (sudah SUCCESS) — settle ulang harus replay

@@ -2,7 +2,7 @@ import { InMemoryWalletStore } from '../src/wallet/in-memory-wallet.store';
 import { WalletService } from '../src/wallet/wallet.service';
 import { PinService } from '../src/common/pin.service';
 import { hashSecret } from '../src/common/hash.util';
-import { DomainError } from '../src/common/errors';
+// DomainError dihapus dari import (tidak terpakai)
 
 // Checklist 3: unit test in-memory tetap jalan di mana-mana (tanpa Docker);
 // test dengan Postgres ASLI (race + P2002 + FOR UPDATE + alur e2e IDOR/DTI/

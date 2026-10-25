@@ -132,6 +132,42 @@ export class PrismaWalletStore implements WalletStore {
           },
         });
         const entries: AppliedTransaction['entries'] = [];
+        // Kredit-only (funding eksternal tanpa debit pairs) — didebit ke suspense
+        // supaya invariant tetap berimbang; dalam praktik jalur ini lewat
+        // settleTransaction, tapi guard defensif di sini.
+        if (debitsTotal === 0 && op.credits.length > 0) {
+          const suspense = await tx.walletAccount.upsert({
+            where: { id: 'virtual:external-funding-suspense' },
+            update: {},
+            create: { id: 'virtual:external-funding-suspense', userId: null },
+          });
+          await tx.ledgerEntry.create({
+            data: { accountId: suspense.id, transactionId: transaction.id, direction: 'DEBIT', amount: op.credits.length * transaction.amount },
+          });
+          entries.push({ accountId: suspense.id, direction: 'DEBIT', amount: op.credits.length * transaction.amount });
+          for (const accountId of op.credits) {
+            await tx.ledgerEntry.create({
+              data: { accountId, transactionId: transaction.id, direction: 'CREDIT', amount: transaction.amount },
+            });
+            entries.push({ accountId, direction: 'CREDIT', amount: transaction.amount });
+          }
+          return { transactionId: transaction.id, idempotencyKey: transaction.idempotencyKey, status: 'SUCCESS', created: true, entries };
+        }
+        // Invariant universal: Σdebit == Σkredit untuk SEMUA transaksi.
+        // Dana masuk tanpa debit → debit virtual funding-suspense;
+        // dana keluar tanpa kredit → kredit virtual payout-clearing.
+        const creditsTotal = op.credits.length * debitsTotal;
+        if (debitsTotal > creditsTotal) {
+          const balance = await tx.walletAccount.upsert({
+            where: { id: 'virtual:external-payout-clearing' },
+            update: {},
+            create: { id: 'virtual:external-payout-clearing', userId: null },
+          });
+          await tx.ledgerEntry.create({
+            data: { accountId: balance.id, transactionId: transaction.id, direction: 'CREDIT', amount: debitsTotal - creditsTotal },
+          });
+          entries.push({ accountId: balance.id, direction: 'CREDIT', amount: debitsTotal - creditsTotal });
+        }
         for (const d of op.debits) {
           await tx.ledgerEntry.create({
             data: { accountId: d.accountId, transactionId: transaction.id, direction: 'DEBIT', amount: d.amount },
@@ -218,6 +254,19 @@ export class PrismaWalletStore implements WalletStore {
               data: { accountId: suspense.id, transactionId: transaction.id, direction: 'DEBIT', amount: creditTotal - debitTotal },
             });
             entries.push({ accountId: suspense.id, direction: 'DEBIT', amount: creditTotal - debitTotal });
+          }
+          if (debitTotal > creditTotal) {
+            // Dana keluar (transfer bank ke rekening luar, refund ke BKI) —
+            // sisi eksternal dikredit ke clearing akun virtual, invariant tetap.
+            const clearing = await tx.walletAccount.upsert({
+              where: { id: 'virtual:external-payout-clearing' },
+              update: {},
+              create: { id: 'virtual:external-payout-clearing', userId: null },
+            });
+            await tx.ledgerEntry.create({
+              data: { accountId: clearing.id, transactionId: transaction.id, direction: 'CREDIT', amount: debitTotal - creditTotal },
+            });
+            entries.push({ accountId: clearing.id, direction: 'CREDIT', amount: debitTotal - creditTotal });
           }
           for (const d of op.debits ?? []) {
             await tx.$queryRaw`SELECT "id" FROM "WalletAccount" WHERE "id" = ${d.accountId} FOR UPDATE`;

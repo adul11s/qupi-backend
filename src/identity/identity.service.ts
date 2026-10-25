@@ -1,7 +1,7 @@
 import { BadRequestException, ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { randomInt } from 'crypto';
 import { DomainError } from '../common/errors';
-import { hashSecret, verifySecret, needsMigrationToScrypt } from '../common/hash.util';
+import { hashSecret, verifySecretAsync, needsMigrationToScrypt } from '../common/hash.util';
 import { IdentityRepository, OtpRecord, UserRecord } from './identity.repository';
 
 // Fase-2 #2: maksimal 5 percobaan salah per kode OTP — lebih → kode invalid.
@@ -82,7 +82,7 @@ export class IdentityService {
     const otp = await this.repo.latestOtp(userId, purpose);
     if (!otp || otp.verifiedAt) throw new DomainError('OTP_INVALID', 'OTP tidak valid atau sudah dipakai');
     if (this.now().getTime() > otp.expiresAt.getTime()) throw new DomainError('OTP_EXPIRED', 'OTP sudah kedaluwarsa');
-    const ver = verifySecret(code, otp.codeHash);
+    const ver = await verifySecretAsync(code, otp.codeHash);
     if (ver !== true) {
       const n = (this.otpWrong.get(otp.id) ?? 0) + 1;
       this.otpWrong.set(otp.id, n);
@@ -143,7 +143,7 @@ export class IdentityService {
       throw new ForbiddenException('Akun terkunci karena 5x PIN salah. Buka lewat OTP (purpose UNLOCK)');
     }
     if (user.status === 'BLOCKED') throw new ForbiddenException('Akun diblokir');
-    const ver = user.pinHash ? verifySecret(pin, user.pinHash) : null;
+    const ver = user.pinHash ? await verifySecretAsync(pin, user.pinHash) : null;
     const ok = ver === true;
     await this.repo.createLoginAttempt({ userId, success: ok, reason: ok ? undefined : 'PIN_SALAH' });
     if (!ok) {

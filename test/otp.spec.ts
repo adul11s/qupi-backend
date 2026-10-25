@@ -3,7 +3,7 @@ import { InMemoryIdentityRepository } from '../src/identity/in-memory-identity.r
 import { DomainError } from '../src/common/errors';
 
 const FIXED = new Date('2026-01-01T00:00:00Z');
-let nowMs = FIXED.getTime();
+const nowMs = FIXED.getTime();
 
 describe('Identity: OTP kadaluarsa & rate limit', () => {
   const repo = new InMemoryIdentityRepository();

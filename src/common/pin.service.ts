@@ -1,5 +1,5 @@
 import { BadRequestException, ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
-import { hashSecret, verifySecret, needsMigrationToScrypt } from './hash.util';
+import { hashSecret, verifySecretAsync, needsMigrationToScrypt } from './hash.util';
 import { PrismaService } from './prisma.service';
 import { opts } from './config';
 
@@ -76,7 +76,7 @@ export class PinService {
     this.bumpFailed(userId);
     const user = await this.db.user.findUnique({ where: { id: userId } });
     if (!user) throw new UnauthorizedException('Sesi tidak valid');
-    const ver = user.pinHash ? verifySecret(String(pin), user.pinHash) : null;
+    const ver = user.pinHash ? await verifySecretAsync(String(pin), user.pinHash) : null;
     if (ver !== true) {
       throw new BadRequestException('PIN_SALAH');
     }

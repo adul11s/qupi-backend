@@ -71,7 +71,9 @@ export class CreditService {
     let line = await this.db.payLaterLine.findUnique({ where: { userId } });
     if (!line) {
       const limit = await this.computeLimit(userId);
-      line = await this.db.payLaterLine.create({ data: { userId, limitAmount: limit, activated: true } });
+      // Fase-4 #4: line baru dibuat TIDAK aktif — aktivasi PayLater wajib lewat
+      // endpoint activate (verifikasi PIN); checkout tidak lagi auto-aktivasi.
+      line = await this.db.payLaterLine.create({ data: { userId, limitAmount: limit, activated: false } });
     }
     return line;
   }

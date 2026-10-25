@@ -7,7 +7,11 @@ import { WalletService } from './wallet.service';
 
 // Fase-3 #1: callback provider pindah ke webhook internal — TIDAK di jalur user
 // (tanpa x-session-token), wajib verifikasi HMAC-SHA256 atas body RAW.
-// Secret dari env WALLET_CALLBACK_SECRET (default pilot 'qupi-dev-secret').
+// Secret dari env WALLET_CALLBACK_SECRET — FAIL-CLOSED fase-4 #1: tanpa secret
+// (kosong/tidak di-set) setiap callback ditolak 403, tidak ada default dev.
+const SECRET_MISSING = 'WALLET_CALLBACK_SECRET belum di-set di env (fail-closed)';
+export const callbackSecretConfigured = (): boolean => typeof process.env.WALLET_CALLBACK_SECRET === 'string' && process.env.WALLET_CALLBACK_SECRET.length > 0;
+
 @Public()
 @Controller('internal/callback')
 export class InternalCallbackController {
@@ -19,8 +23,9 @@ export class InternalCallbackController {
     @Param('tid') tid: string,
     @Body() body: { status?: 'SUCCESS' | 'FAILED' },
   ) {
+    const secret = process.env.WALLET_CALLBACK_SECRET;
+    if (!secret || secret.length === 0) throw new ForbiddenException(SECRET_MISSING);
     const raw = Buffer.isBuffer(req.rawBody) ? req.rawBody : Buffer.from(JSON.stringify(body ?? {}));
-    const secret = process.env.WALLET_CALLBACK_SECRET ?? 'qupi-dev-secret';
     const expected = createHmac('sha256', secret).update(raw).digest('hex');
     const got = req.headers['x-internal-signature'];
     const gotStr = typeof got === 'string' ? got : Array.isArray(got) ? got[0] : '';

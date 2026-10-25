@@ -208,8 +208,21 @@ export class PaymentService {
     const bill = await this.db.bill.findUnique({ where: { id: inquiryId } });
     if (!bill) throw new DomainError('BILL_NOT_FOUND', 'Inquiry tagihan tidak ditemukan');
     if (bill.userId !== userId) throw new DomainError('FORBIDDEN', 'Tagihan bukan milik akun ini', 403 as never);
-    if (bill.status !== 'PENDING') throw new DomainError('BILL_PAID', 'Tagihan sudah dibayar', 400 as never);
+    // total = nominal + biaya admin simulasi 2.500
     const total = bill.amount + 2_500;
+    if (bill.status !== 'PENDING') {
+      // Fase-4 #3: tagihan sudah PAID tapi key sama dan cocok dengan PayLaterTx
+      // milik user ini atas nominal tagihan ini → replay idempoten (response lama)
+      // dan `used` pasti tidak bertambah. Key dipakai untuk tagihan/besaran lain → 400.
+      const prior = await this.db.payLaterTx.findUnique({ where: { idempotencyKey } });
+      // kolom userId tidak ada di payLaterTx — cocokkan via line milik user.
+      const line = await this.db.payLaterLine.findUnique({ where: { userId } });
+      const isMine = prior && line && prior.lineId === line.id && prior.amount === bill.amount;
+      if (isMine) {
+        return { message: 'Tagihan dibayar dari PayLater (replay idempoten)', data: { billId: bill.id, total, payLaterTxId: prior.id, replay: true } };
+      }
+      throw new DomainError('BILL_PAID', 'Tagihan sudah dibayar', 400 as never);
+    }
     // Fase-3 #2: fingerprint BILL = user+total+inquiryId yang dibayar.
     const fingerprint = makeFingerprint(userId, 'BILL', total, bill.id);
     // Fase-2 #3: claim kondisional PENDING->PAID atomik — bayar dobel → 400.
@@ -237,13 +250,9 @@ export class PaymentService {
       if (!line?.activated) throw new DomainError('PAYLATER_NOT_ACTIVE', 'PayLater belum aktif');
       // Fase-3 #2/#4: fingerprint BILL-paylater + guard limit kondisional + DTI.
       const fingerprintPl = makeFingerprint(userId, 'BILL_PAYLATER', total, bill.id);
-      // Fase-2 #3: cek limit + buat cicilan DALAM SATU transaksi (atom).
+      // Fase-4 #3: cek idempotensi SEBELUM increment `used` — retry dengan key
+      // dan payload sama tidak lagi menggelembungkan limit yang terpakai.
       const payLaterTx = await this.db.$transaction(async (tx): Promise<{ id: string }> => {
-        const upd = await tx.payLaterLine.updateMany({
-          where: { id: line.id, used: { lte: line.limitAmount - total } },
-          data: { used: { increment: total } },
-        });
-        if (upd.count === 0) throw new DomainError('LIMIT_EXCEEDED', 'Limit PayLater tidak mencukupi');
         const existing = await tx.payLaterTx.findUnique({ where: { idempotencyKey } });
         if (existing) {
           // Fase-3 #2: key sama tapi payload beda → 409, jangan tandai lunas tagihan lain.
@@ -252,6 +261,11 @@ export class PaymentService {
           }
           return { id: existing.id };
         }
+        const upd = await tx.payLaterLine.updateMany({
+          where: { id: line.id, used: { lte: line.limitAmount - total } },
+          data: { used: { increment: total } },
+        });
+        if (upd.count === 0) throw new DomainError('LIMIT_EXCEEDED', 'Limit PayLater tidak mencukupi');
         const freshUser = await tx.user.findUniqueOrThrow({ where: { id: userId } });
         assertDti(freshUser.monthlyIncome, total);
         const pl = await tx.payLaterTx.create({

@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { WalletService } from './wallet.service';
 import { Request } from 'express';
-import { KeyPipe, MoneyPipe } from '../common/pipes';
+import { KeyPipe, MoneyPipe, AmountPipe } from '../common/pipes';
 import { SessionGuard } from '../common/session.guard';
 import { PinService } from '../common/pin.service';
 import { reqUser } from '../common/req-user';
@@ -41,16 +41,18 @@ export class WalletController {
   // Fase-3 #1: callback DIHAPUS dari jalur user — pindah ke webhook internal
   // POST /internal/callback/topup/:tid dengan x-internal-signature (HMAC-SHA256).
 
+  // Fase-4 #5: nominal integer rupiah murni (AmountPipe) — NaN/pecahan/eksponensial → 400 INVALID_AMOUNT.
   @Post('transfer')
   async transfer(
     @Req() req: Request,
     @Body() body: { toUserId: string; amount: number; pin: string },
     @Body('idempotencyKey', KeyPipe) idempotencyKey: string,
+    @Body('amount', AmountPipe) amount: number,
   ) {
     const user = reqUser(req) as User;
     this.pin.assertFormat(body.pin);
     await this.pin.verify(user.id, body.pin);
-    return this.wallet.transferInternal(user.id, body.toUserId, Number(body.amount), idempotencyKey);
+    return this.wallet.transferInternal(user.id, body.toUserId, amount, idempotencyKey);
   }
 
   @Post('transfer/bank')
@@ -58,11 +60,12 @@ export class WalletController {
     @Req() req: Request,
     @Body() body: { bankCode: string; accountNumber: string; toUserId?: string; amount: number; pin: string },
     @Body('idempotencyKey', KeyPipe) idempotencyKey: string,
+    @Body('amount', AmountPipe) amount: number,
   ) {
     const user = reqUser(req) as User;
     this.pin.assertFormat(body.pin);
     await this.pin.verify(user.id, body.pin);
-    return this.wallet.transferBank(user.id, Number(body.amount), idempotencyKey, body);
+    return this.wallet.transferBank(user.id, amount, idempotencyKey, body);
   }
 
   @Get('balance')

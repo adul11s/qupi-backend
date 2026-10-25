@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Inject, Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Inject, Injectable, Optional } from '@nestjs/common';
 import { DomainError } from '../common/errors';
 import {
   WalletStore,
@@ -10,6 +10,7 @@ import { RiskService } from '../risk/risk.module';
 import { PrismaService } from '../common/prisma.service';
 import { QueueService } from '../queue/queue.service';
 import { makeFingerprint } from '../common/idempotency';
+import { OutboxService } from '../outbox/outbox.service';
 
 export const WALLET_STORE = 'WALLET_STORE';
 
@@ -22,7 +23,23 @@ export class WalletService {
     private readonly queue: QueueService,
     private readonly db?: PrismaService, // opsional: test in-memory tanpa DB
     private readonly risk?: RiskService, // opsional: test unit lama tetap jalan
+    @Optional() private readonly outbox?: OutboxService, // Fase-6: settlement tahan restart
   ) {}
+
+  // Fase-6 outbox: event settlement dicatat DALAM SATU unit atomic bersama
+  // pledge (OutboxStore.appendAtomicWith) lalu diproses async. Bila proses
+  // mati sebelum handler jalan, restart membaca ulang event PENDING — tidak
+  // ada dana menggantung di jalur PENDING.
+  private async publishSettlement(payload: Record<string, unknown>, alongside?: () => Promise<unknown>): Promise<void> {
+    if (this.outbox) {
+      await this.outbox.commit({ queue: 'settlement', payload }, alongside);
+      setImmediate(() => {
+        void this.outbox?.process().catch(() => undefined);
+      });
+      return;
+    }
+    await this.queue.enqueue('settlement', payload);
+  }
 
   // Fase-5: RiskService dipanggil untuk transfer — hanya cap safety 2.5 miliar
   // (keputusan produk: dompet tanpa batas transaksi 10jt, rule sudah dihapus).
@@ -78,7 +95,7 @@ export class WalletService {
     }
     if (mode === 'timeout') {
       // simulasikan provider tak merespons: tergantung POLLING/OK disetel persetujuannya via callback atau pekerja.
-      this.queue.enqueue('settlement', { transactionId: pending.transactionId });
+      await this.publishSettlement({ transactionId: pending.transactionId });
       return {
         message: 'Top up sedang diproses, mohon tunggu (PENDING); gunakan callback/polling untuk menyudahkan',
         data: await this.store.getTransactionByTid(pending.transactionId),
@@ -154,12 +171,44 @@ export class WalletService {
     const destAccountId = to.toUserId ? await this.store.ensureAccount(to.toUserId) : null;
     // Rekening luar (tanpa toUserId): tidak ada account ledger internal tujuan —
     // settle tanpa credit (uang keluar ke bank luar), sehingga tidak stuck PENDING.
-    this.queue.enqueue('settlement', {
+    this.publishSettlement({
       transactionId: pending.transactionId,
       debits: [{ accountId: from, amount }],
       credits: destAccountId ? [destAccountId] : [],
     });
     return { message: 'Transfer bank ikut PENDING, status akan disettle via pekerja/callback', data: await this.store.getTransactionByTid(pending.transactionId) };
+  }
+
+  // Fase-6: refund manual admin — transaksi ledger atas diri (kind REFUND,
+  // debit user, uang keluar ke jalur provider). Idempotent via key refund-<tid>.
+  async refundTopup(transactionId: string, actorId: string) {
+    const t = await this.store.getTransactionByTid(transactionId);
+    if (!t) throw new DomainError('TX_NOT_FOUND', 'Transaksi tidak ditemukan');
+    if (t.kind !== 'TOPUP') throw new DomainError('TX_KIND_MISMATCH', 'Refund hanya untuk transaksi TOPUP', 400 as never);
+    if (t.status !== 'SUCCESS') {
+      throw new DomainError('REFUND_NOT_ALLOWED', 'Hanya topup SUCCESS yang bisa di-refund', 400 as never);
+    }
+    if (!t.userId) throw new DomainError('REFUND_NOT_ALLOWED', 'Refund butuh user pemilik topup', 400 as never);
+    let amount = t.amount;
+    if (!amount || amount <= 0) {
+      // fallback in-memory (metadata tidak menyimpan amount): hitung dari ledger
+      const acc = await this.store.accountIdOf(t.userId);
+      const rows = await this.store.history(acc as string, { page: 1, limit: 100 });
+      amount = rows
+        .filter((r) => r.transactionId === transactionId && r.direction === 'CREDIT')
+        .reduce((a, r) => a + r.amount, 0);
+    }
+    const from = await this.store.ensureAccount(t.userId);
+    const res = await this.store.applyTransaction({
+      idempotencyKey: `refund-${transactionId}`,
+      kind: 'REFUND',
+      userId: t.userId,
+      counterparty: 'REFUND-MANUAL',
+      fingerprint: makeFingerprint(actorId, 'REFUND', amount, transactionId),
+      debits: [{ accountId: from, amount }],
+      credits: [],
+    });
+    return { message: res.created ? 'Refund berhasil' : 'Refund sudah pernah diproses (idempoten)', data: res };
   }
 
   async settleFromQueue(payload: { transactionId: string; debits?: { accountId: string; amount: number }[]; credits?: string[] }) {
@@ -169,7 +218,7 @@ export class WalletService {
       await this.store.settleTransaction({
         transactionId: payload.transactionId,
         status: 'SUCCESS',
-        amount: tx.amount,
+        amount: tx.amount ?? undefined,
         debits: payload.debits ?? [],
         credits: payload.credits ?? [],
       });

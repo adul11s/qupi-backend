@@ -82,7 +82,7 @@ export interface WalletStore {
     failReason?: string | null;
     counterparty?: string | null;
     userId?: string | null;
-    amount?: number;
+    amount?: number | null;
   } | null>;
   getBalanceFromLedger(accountId: string): Promise<number>;
   history(accountId: string, filter: HistoryFilter): Promise<HistoryRow[]>;

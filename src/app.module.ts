@@ -1,6 +1,9 @@
 import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { IdentityModule } from './identity/identity.module';
+import { AuditModule } from './audit/audit.module';
+import { OutboxModule } from './outbox/outbox.module';
+import { ReconciliationModule } from './reconciliation/reconciliation.module';
 import { WalletModule } from './wallet/wallet.module';
 import { PaymentModule } from './payment/payment.module';
 import { CreditModule } from './credit/credit.module';
@@ -16,7 +19,7 @@ import { PrismaService } from './common/prisma.service';
 // Monolith modular: identity | wallet | payment | credit | risk | admin
 // Sesi global: SessionGuard dengan @Public() untuk endpoint terbuka.
 @Module({
-  imports: [SessionGlobalModule, IdentityModule, WalletModule, PaymentModule, CreditModule, RiskModule, AdminModule, QueueModule, WorkerModule],
+  imports: [SessionGlobalModule, AuditModule, OutboxModule, IdentityModule, WalletModule, PaymentModule, CreditModule, RiskModule, AdminModule, QueueModule, WorkerModule, ReconciliationModule],
   providers: [
     { provide: APP_GUARD, useClass: SessionGuard },
     SessionService,

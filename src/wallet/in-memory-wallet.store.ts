@@ -38,7 +38,7 @@ interface Entry {
 let seq = 0;
 export class InMemoryWalletStore implements WalletStore {
   entries: Entry[] = [];
-  transactions: Map<string, { id: string; idempotencyKey: string; status: string; kind: string; fingerprint?: string }> = new Map();
+  transactions: Map<string, { id: string; idempotencyKey: string; status: string; kind: string; fingerprint?: string; amount?: number | null; userId?: string | null }> = new Map();
   accounts = new Map<string, { id: string; userId: string }>();
   private locks = new Map<string, Promise<unknown>>();
 
@@ -135,6 +135,9 @@ export class InMemoryWalletStore implements WalletStore {
           status: 'SUCCESS',
           kind: op.kind,
           fingerprint: op.fingerprint,
+          // meta utk topupCallback (webhook): amount & userId perlu tersimpan
+          amount: debitsTotal,
+          userId: (op as { userId?: string }).userId ?? null,
         });
         const entries = this.writeEntries(txId, op.debits, op.credits, debitsTotal);
         return { transactionId: txId, idempotencyKey: op.idempotencyKey, status: 'SUCCESS', created: true, entries };
@@ -161,6 +164,8 @@ export class InMemoryWalletStore implements WalletStore {
         status: 'PENDING',
         kind: op.kind,
         fingerprint: op.fingerprint,
+        amount: op.amount,
+        userId: op.userId ?? null,
       });
       this.entries.push({
         accountId: op.accountId,
@@ -180,6 +185,13 @@ export class InMemoryWalletStore implements WalletStore {
   async settleTransaction(op: SettleTransactionOp): Promise<AppliedTransaction> {
     const debits = op.debits ?? [];
     return this.withLock(debits.map((d) => d.accountId), async () => {
+      // Fase-6 chaos: settle pada tx yang SUDAH settle (webhook ganda) → replay
+      // tanpa menulis ledger baru, saldo tidak bisa bertambah dua kali.
+      const existing = [...this.transactions.values()].find((t) => t.id === op.transactionId);
+      const failedOnTx = op.status === 'FAILED' && existing?.status === 'FAILED';
+      if (existing && existing.status !== 'PENDING' && !failedOnTx) {
+        return this.replay(op.transactionId);
+      }
       for (const d of debits) {
         if (this.balanceOf(d.accountId) < d.amount) {
           throw new InsufficientBalanceError(`Saldo tidak mencukupi untuk akun ${d.accountId}`);
@@ -201,9 +213,20 @@ export class InMemoryWalletStore implements WalletStore {
     return { transactionId: txId, idempotencyKey: '', status: 'SUCCESS', created: false, entries };
   }
 
-  async getTransactionByTid(transactionId: string): Promise<{ id: string; status: string; kind: string; failReason?: string | null; counterparty?: string | null; userId?: string | null } | null> {
+  async getTransactionByTid(transactionId: string): Promise<{ id: string; status: string; kind: string; failReason?: string | null; counterparty?: string | null; userId?: string | null; amount?: number | null; } | null> {
     const item = [...this.transactions.values()].find((t) => t.id === transactionId);
-    return item ? { ...item, failReason: null, counterparty: null } : null;
+    if (!item) return null;
+    // amount dari meta; fallback agregat ledger bila meta belum terisi
+    const fromLedger = this.entries
+      .filter((e) => e.transactionId === transactionId && e.amount > 0)
+      .reduce((a, e) => a + e.amount, 0);
+    return {
+      ...item,
+      failReason: null,
+      counterparty: null,
+      amount: typeof item.amount === 'number' && item.amount > 0 ? item.amount : fromLedger,
+      userId: item.userId ?? null,
+    };
   }
 
   async getBalanceFromLedger(accountId: string): Promise<number> {

@@ -1,10 +1,11 @@
-import { BadRequestException, ForbiddenException, Inject, Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Inject, Injectable, Optional } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 import { WALLET_STORE, WalletService } from '../wallet/wallet.service';
 import { WalletStore } from '../wallet/wallet.store';
 import { DomainError } from '../common/errors';
 import { opts, providerMode } from '../common/config';
 import { QueueService } from '../queue/queue.service';
+import { OutboxService } from '../outbox/outbox.service';
 import { makeFingerprint } from '../common/idempotency';
 import { assertDti } from '../common/dti';
 import { RiskService } from '../risk/risk.module';
@@ -32,7 +33,19 @@ export class PaymentService {
     private readonly wallet: WalletService,
     private readonly queue: QueueService,
     private readonly risk?: RiskService, // opsional: evaluasi risiko QRIS
+    @Optional() private readonly outbox?: OutboxService, // Fase-6: settlement tahan restart
   ) {}
+
+  private publishSettlement(payload: Record<string, unknown>): void {
+    if (this.outbox) {
+      void this.outbox
+        .commit({ queue: 'settlement', payload })
+        .then(() => this.outbox?.process())
+        .catch(() => undefined);
+      return;
+    }
+    void this.queue.enqueue('settlement', payload);
+  }
 
   private assertRisk(kind: string, amount: number, userId: string, txCountToday?: number): void {
     if (!this.risk) return;
@@ -113,7 +126,7 @@ export class PaymentService {
         await this.db.qrisPayment.updateMany({ where: { id: qrisId, status: 'PAID' }, data: { status: 'PENDING' } });
         throw e;
       }
-      this.queue.enqueue('settlement', { qrisId });
+      this.publishSettlement({ qrisId });
       return { message: 'QRIS berhasil dibayar dari saldo', data: { qris, transaction: tx } };
     }
 
@@ -165,7 +178,7 @@ export class PaymentService {
       await tx.qrisPayment.update({ where: { id: qrisId }, data: { status: 'PAID' } });
       return pl.id;
     });
-    this.queue.enqueue('settlement', { qrisId });
+    this.publishSettlement({ qrisId });
     return {
       message: `QRIS dibayar via PayLater (single debit, ${tenorMonths}x cicilan), saldo TIDAK tersentuh`,
       data: { qrisId, payLaterTxId, paidWith: 'PAYLATER', totalAmount, totalInterest },

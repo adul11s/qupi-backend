@@ -1,0 +1,597 @@
+openapi: 3.0.3
+info:
+  title: qupi-backend API (HTTPS disimulasikan)
+  version: 0.6.0
+  description: |
+    Backend monolith modular qupi. Auth via sesi `x-session-token` (POST /identity/login),
+    aksi sensitif transaksi wajib `pin` 6 digit diverifikasi server-side, mutasi transaksi
+    (topup/transfer/bayar) wajib header `Idempotency-Key`. Callback provider dipindah ke
+    webhook internal POST /internal/callback/topup/{tid} ber-HMAC `x-internal-signature`.
+    Aksi admin terekam append-only di AuditLog, terbaca via GET /admin/audit.
+servers:
+  - url: http://localhost:4000/api
+tags:
+  - name: identity
+  - name: wallet
+  - name: payment
+  - name: credit
+  - name: admin
+  - name: internal
+security:
+  - SessionToken: []
+paths:
+  /identity/register:
+    post:
+      tags: [identity]
+      security: []
+      summary: Registrasi user baru (belum aktif, minta OTP)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, name]
+              properties:
+                phone: { type: string, example: "081234567890" }
+                name: { type: string, example: "Chairunnisa" }
+      responses:
+        "200": { description: Registrasi berhasil }
+        "409": { description: PHONE_TAKEN }
+  /identity/otp/request:
+    post:
+      tags: [identity]
+      security: []
+      summary: Minta OTP (LOGIN/UNLOCK/RESET_PIN); OTP_DEBUG=1 -> kode dikembalikan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                phone: { type: string }
+                userId: { type: string }
+                purpose: { type: string, enum: [LOGIN, UNLOCK, RESET_PIN] }
+      responses:
+        "200": { description: OTP dikirim (otp disertakan saat OTP_DEBUG) }
+        "403": { description: Purpose tidak dikenal }
+        "429": { description: RATE_LIMIT }
+  /identity/otp/verify:
+    post:
+      tags: [identity]
+      security: []
+      summary: Verifikasi OTP; user baru tanpa PIN dapat sesi terbatas utk setPIN
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                userId: { type: string }
+                purpose: { type: string, enum: [LOGIN, UNLOCK, RESET_PIN] }
+                code: { type: string }
+      responses:
+        "200": { description: OTP terverifikasi }
+        "401": { description: OTP_INVALID / OTP_EXPIRED }
+  /identity/pin/set:
+    post:
+      tags: [identity]
+      summary: Set PIN (bukti OTP terverifikasi + sesi aktif)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pin]
+              properties:
+                userId: { type: string }
+                pin: { type: string, example: "123456" }
+      responses:
+        "200": { description: PIN disimpan }
+        "401": { description: OTP proof tidak valid }
+  /identity/pin/reset:
+    post:
+      tags: [identity]
+      security: []
+      summary: Reset PIN dengan OTP RESET_PIN
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId, code, pin]
+              properties:
+                userId: { type: string }
+                code: { type: string }
+                pin: { type: string }
+      responses:
+        "200": { description: PIN direset }
+        "401": { description: OTP_NEW_PIN_REQUIRED / OTP_INVALID }
+  /identity/login:
+    post:
+      tags: [identity]
+      security: []
+      summary: Login PIN -> token sesi (idle 15 menit)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pin]
+              properties:
+                userId: { type: string }
+                phone: { type: string }
+                pin: { type: string }
+      responses:
+        "200":
+          description: Berhasil; return { userId, sessionToken }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      userId: { type: string }
+                      sessionToken: { type: string }
+        "401": { description: PIN_INVALID }
+        "423": { description: LOCKED }
+  /identity/logout:
+    post:
+      tags: [identity]
+      summary: Logout — token direvoke server-side
+      responses: { "200": { description: Sesi diakhiri } }
+  /identity/session/refresh:
+    post:
+      tags: [identity]
+      summary: Refresh sesi — token lama dibatalkan, token baru dikembalikan
+      responses: { "200": { description: Sesi diperbarui } }
+  /identity/session/clock/advance:
+    post:
+      tags: [identity]
+      summary: Simulasi jam (keperluan uji idle) — minutes 0-180
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [minutes]
+              properties:
+                minutes: { type: integer, minimum: 0, maximum: 180 }
+      responses: { "200": { description: Ok } }
+  /identity/unlock:
+    post:
+      tags: [identity]
+      security: []
+      summary: Buka akun terkunci dengan OTP UNLOCK
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId, code]
+              properties:
+                userId: { type: string }
+                code: { type: string }
+      responses: { "200": { description: Akun dibuka }, "401": { description: OTP_INVALID } }
+  /identity/kyc/upload:
+    post:
+      tags: [identity]
+      summary: Upload dokumen KYC (base64) — PENDING menunggu admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contentBase64]
+              properties:
+                kind: { type: string, example: KTP }
+                fileName: { type: string }
+                contentBase64: { type: string, format: byte }
+      responses: { "200": { description: Dokumen diunggah }, "400": { description: contentBase64 kosong } }
+  /identity/kyc/documents:
+    get:
+      tags: [identity]
+      summary: Daftar dokumen KYC milik user
+      responses: { "200": { description: Daftar dokumen } }
+  /identity/lookup:
+    get:
+      tags: [identity]
+      summary: Cari user by phone — nama ter-obfuskasi (2 karakter awal + ***)
+      parameters:
+        - { name: phone, in: query, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Ditemukan (data.id, nama obfusk) }
+        "404": { description: User tidak ditemukan }
+  /wallet/balance:
+    get:
+      tags: [wallet]
+      summary: Saldo dari ledger
+      responses: { "200": { description: data.balance } }
+      parameters:
+        - { name: x-session-token, in: header, required: true, schema: { type: string } }
+  /wallet/topup:
+    post:
+      tags: [wallet]
+      summary: Topup BKI sandbox (PENDING -> callback) — Idempotency-Key wajib, PIN wajib
+      parameters:
+        - { name: Idempotency-Key, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, pin, idempotencyKey]
+              properties:
+                amount: { type: integer, example: 100000 }
+                idempotencyKey: { type: string }
+                pin: { type: string, pattern: "^[0-9]{6}$" }
+      responses:
+        "200": { description: Transaksi dibuat (PENDING atau settled) }
+        "400": { description: INVALID_AMOUNT / PIN_INVALID }
+        "403": { description: SALDO_TIER_EXCEEDED }
+  /wallet/transactions/{tid}:
+    get:
+      tags: [wallet]
+      summary: Status transaksi (polling untuk PENDING)
+      parameters:
+        - { name: tid, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Status transaksi }
+        "404": { description: TX_NOT_FOUND }
+  /wallet/transfer:
+    post:
+      tags: [wallet]
+      summary: Transfer internal (user ke user) — PIN + Idempotency-Key wajib
+      parameters:
+        - { name: Idempotency-Key, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [toUserId, amount, pin, idempotencyKey]
+              properties:
+                toUserId: { type: string }
+                amount: { type: integer }
+                pin: { type: string, pattern: "^[0-9]{6}$" }
+                idempotencyKey: { type: string }
+      responses:
+        "200": { description: created=true/false }
+        "400": { description: INSUFFICIENT_BALANCE / INVALID_AMOUNT }
+        "403": { description: RISK_BLOCK }
+  /wallet/transfer/bank:
+    post:
+      tags: [wallet]
+      summary: Transfer ke rekening bank luar (PENDING via provider) — PIN + Idempotency-Key wajib
+      parameters:
+        - { name: Idempotency-Key, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [bankCode, accountNumber, amount, pin, idempotencyKey]
+              properties:
+                bankCode: { type: string, example: BCA }
+                accountNumber: { type: string, example: "001234" }
+                toUserId: { type: string }
+                amount: { type: integer }
+                pin: { type: string, pattern: "^[0-9]{6}$" }
+                idempotencyKey: { type: string }
+      responses:
+        "200": { description: PENDING via worker }
+        "400": { description: INSUFFICIENT_BALANCE }
+        "403": { description: RISK_BLOCK }
+  /wallet/history:
+    get:
+      tags: [wallet]
+      summary: Riwayat transaksi (filter kind / tanggal, paginasi)
+      parameters:
+        - { name: kind, in: query, schema: { type: string } }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+        - { name: page, in: query, schema: { type: integer } }
+        - { name: limit, in: query, schema: { type: integer } }
+      responses: { "200": { description: Riwayat transaksi } }
+  /payment/qris:
+    post:
+      tags: [payment]
+      summary: Buat QRIS dynamic
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount: { type: integer }
+      responses: { "200": { description: QRIS aktif } }
+  /payment/qris/{id}:
+    get:
+      tags: [payment]
+      summary: Detail QRIS (hanya owner)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Detail QRIS }
+        "404": { description: QRIS_NOT_FOUND }
+  /payment/qris/{id}/pay:
+    post:
+      tags: [payment]
+      summary: Bayar QRIS (method BALANCE dari saldo / PAYLATER single-debit) — PIN wajib
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: Idempotency-Key, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [method, pin, idempotencyKey]
+              properties:
+                method: { type: string, enum: [BALANCE, PAYLATER] }
+                pin: { type: string, pattern: "^[0-9]{6}$" }
+                tenorMonths: { type: integer, enum: [1, 3, 6] }
+                idempotencyKey: { type: string }
+      responses:
+        "200": { description: Settled }
+        "400": { description: SALDO/PIN errors }
+  /payment/bills/inquiry:
+    post:
+      tags: [payment]
+      summary: Inquiry tagihan (PLN/PULSA/DATA) — inquiry ulang sebelum dibayar menghasilkan inquiryId sama
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider, number]
+              properties:
+                provider: { type: string, enum: [PLN, PULSA, DATA] }
+                number: { type: string }
+      responses: { "200": { description: Detail tagihan } }
+  /payment/bills/pay:
+    post:
+      tags: [payment]
+      summary: Bayar tagihan inquiry (BALANCE / PAYLATER) — PIN + Idempotency-Key wajib
+      parameters:
+        - { name: Idempotency-Key, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [inquiryId, method, pin, idempotencyKey]
+              properties:
+                inquiryId: { type: string }
+                method: { type: string, enum: [BALANCE, PAYLATER] }
+                pin: { type: string, pattern: "^[0-9]{6}$" }
+                idempotencyKey: { type: string }
+      responses:
+        "200": { description: Tagihan dibayar }
+        "400": { description: INQUIRY_INVALID }
+  /credit/paylater/limit:
+    get:
+      tags: [credit]
+      summary: Info limit paylater (rule KTP disetujui -> 2.5x topup 30 hari, clamp)
+      responses: { "200": { description: Limit } }
+  /credit/paylater/activate:
+    post:
+      tags: [credit]
+      summary: Aktivasi paylater — PIN wajib
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pin]
+              properties:
+                pin: { type: string, pattern: "^[0-9]{6}$" }
+      responses: { "200": { description: Aktif } }
+  /credit/paylater/checkout:
+    post:
+      tags: [credit]
+      summary: Checkout paylater (tenor 1/3/6) — PIN + Idempotency-Key wajib
+      parameters:
+        - { name: Idempotency-Key, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, tenorMonths, idempotencyKey, pin]
+              properties:
+                amount: { type: integer }
+                tenorMonths: { type: integer, enum: [1, 3, 6] }
+                idempotencyKey: { type: string }
+                pin: { type: string, pattern: "^[0-9]{6}$" }
+      responses:
+        "200": { description: Cicilan dibuat }
+        "400": { description: INACTIVE / LIMIT_EXCEEDED }
+  /credit/paylater/recap:
+    get:
+      tags: [credit]
+      summary: Recap paylater
+      responses: { "200": { description: Recap } }
+  /credit/paylater/installments:
+    get:
+      tags: [credit]
+      summary: Daftar cicilan milik user
+      responses: { "200": { description: Cicilan } }
+  /credit/paylater/installments/{id}/pay:
+    post:
+      tags: [credit]
+      summary: Bayar cicilan dari saldo — PIN + Idempotency-Key wajib
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: Idempotency-Key, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pin, idempotencyKey]
+              properties:
+                pin: { type: string, pattern: "^[0-9]{6}$" }
+                idempotencyKey: { type: string }
+      responses:
+        "200": { description: Cicilan dibayar }
+        "400": { description: INSUFFICIENT_BALANCE }
+  /credit/paylater/penalties/recompute:
+    post:
+      tags: [credit]
+      summary: Recompute denda — hanya admin boleh untuk userId lain
+      responses: { "200": { description: Recomputed } }
+  /admin/kyc/documents:
+    get:
+      tags: [admin]
+      summary: Daftar dokumen KYC (wajib role admin)
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [PENDING, APPROVED, REJECTED, UPLOAD_AGAIN] } }
+        - { name: userId, in: query, schema: { type: string } }
+      responses: { "200": { description: Daftar dokumen } }
+  /admin/kyc/documents/{id}:
+    patch:
+      tags: [admin]
+      summary: Approve/Reject/Upload_again dokumen KYC — tercatat di AuditLog
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: { type: string, enum: [APPROVE, REJECT, UPLOAD_AGAIN] }
+                rejectionReason: { type: string }
+      responses:
+        "200": { description: STATUS changed }
+        "404": { description: DOC_NOT_FOUND }
+  /admin/users/{id}/limit-info:
+    patch:
+      tags: [admin]
+      summary: Set monthlyIncome / kycTier user — tercatat di AuditLog
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                monthlyIncome: { type: integer, minimum: 1 }
+                kycTier: { type: string, enum: [T1, T2] }
+      responses: { "200": { description: updated }, "400": { description: TIER_INVALID / INCOME_INVALID } }
+  /admin/users/{id}/income:
+    post:
+      tags: [admin]
+      summary: Set penghasilan TERVERIFIKASI (limit paylater x2.5) — tercatat di AuditLog
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [verifiedIncome]
+              properties:
+                verifiedIncome: { type: integer, minimum: 1 }
+      responses: { "200": { description: updated }, "400": { description: INCOME_INVALID } }
+  /admin/transactions/{tid}/refund:
+    post:
+      tags: [admin]
+      summary: Refund topup (ledger REFUND idempoten) — tercatat di AuditLog
+      parameters:
+        - { name: tid, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Refund created (idempoten) }
+        "400": { description: REFUND_NOT_ALLOWED }
+  /admin/audit:
+    get:
+      tags: [admin]
+      summary: Baca audit log append-only (filter, batas 200)
+      parameters:
+        - { name: action, in: query, schema: { type: string, enum: [KYC_UPDATE, INCOME_SET, LIMIT_INFO_SET, REFUND] } }
+        - { name: targetType, in: query, schema: { type: string } }
+        - { name: targetId, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+      responses:
+        "200":
+          description: AuditLog terbaru
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AuditEntry"
+  /internal/callback/topup/{tid}:
+    post:
+      tags: [internal]
+      security: []
+      summary: Webhook sandbox BKI (bukan jalur user) — HMAC-SHA256 atas raw body, fail-closed
+      parameters:
+        - { name: tid, in: path, required: true, schema: { type: string } }
+        - { name: x-internal-signature, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [SUCCESS, FAILED] }
+      responses:
+        "200": { description: Settled (idempoten atas webhook ganda) }
+        "403": { description: INVALID_SIGNATURE / WALLET_CALLBACK_SECRET kosong }
+components:
+  securitySchemes:
+    SessionToken:
+      type: apiKey
+      in: header
+      name: x-session-token
+  schemas:
+    AuditEntry:
+      type: object
+      properties:
+        id: { type: string }
+        actorId: { type: string }
+        actorRole: { type: string, example: ADMIN }
+        action: { type: string, enum: [KYC_UPDATE, INCOME_SET, LIMIT_INFO_SET, REFUND] }
+        targetType: { type: string }
+        targetId: { type: string }
+        detail: { type: object, nullable: true }
+        createdAt: { type: string, format: date-time }
+    DomainError:
+      type: object
+      properties:
+        code: { type: string }
+        message: { type: string }

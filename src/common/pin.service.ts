@@ -18,6 +18,7 @@ interface AttemptWindow {
 export class PinService {
   private static WINDOW_MS = 60_000;
   private attempts = new Map<string, AttemptWindow>();
+  private locks = new Map<string, Promise<unknown>>();
 
   constructor(private readonly db: PrismaService) {}
 
@@ -55,6 +56,20 @@ export class PinService {
     // Checklist 3: attempt dicek dan dicatat sinkron (check+bump atomik di satu
     // tick) supaya percobaan paralel tidak bisa menembus window lock — 8 salah paralel
     // berarti tepat 5 verifikasi diproses dan 3 sisanya langsung PIN_LOCKED 403.
+    // Antrean per-user (muteks logis): check+bump+verify+clear benar-benar tiada
+    // celah satu tick, dan PIN benar tak lagi memicu lock saat dibangunkan paralel
+    // (50 transfer concurrent tetap lolos PIN).
+    const tail = this.locks.get(userId) ?? Promise.resolve();
+    const run = tail.catch(() => undefined).then(() => this.verifyLocked(userId, pin));
+    this.locks.set(userId, run);
+    try {
+      await run;
+    } finally {
+      if (this.locks.get(userId) === run) this.locks.delete(userId);
+    }
+  }
+
+  private async verifyLocked(userId: string, pin: string): Promise<void> {
     if (this.attemptCount(userId) >= opts().pinMaxAttempts) {
       throw new ForbiddenException('Percobaan PIN salah terlalu banyak, coba lagi dalam 1 menit (PIN_LOCKED)');
     }

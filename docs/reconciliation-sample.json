@@ -1,0 +1,19 @@
+{
+  "generatedAt": "2026-10-26T00:00:00.000Z",
+  "balanced": true,
+  "ledgerSummary": {
+    "transactions": 3,
+    "totalDebit": 60000,
+    "totalCredit": 500000
+  },
+  "provider": {
+    "aggregate": { "count": 3, "amount": 560000 },
+    "mode": "success"
+  },
+  "differences": [],
+  "notes": [
+    "Contoh laporan harian dari `npx ts-node scripts/reconcile.ts`.",
+    "balanced=true & differences=[] berarti ledger internal cocok dengan laporan provider header agregat (BKI-SANDBOX, BANK:<rekening>, REFUND-MANUAL).",
+    "Isi nyata ditulis ke RECON_OUTPUT_DIR (default data/, gitignored) sebagai reconciliation-YYYYMMDD-<seq>.json"
+  ]
+}

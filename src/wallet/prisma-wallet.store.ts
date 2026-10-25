@@ -28,10 +28,23 @@ export class PrismaWalletStore implements WalletStore {
   }
 
   async ensureAccount(userId: string): Promise<string> {
+    // userId nullable → dua jenis akun: user wajib (punya baris User, FK),
+    // dan akun virtual/sistem (merchant stub MRC-STUB-001, suspense vault)
+    // tanpa User — dibuat dengan id deterministik supaya idempotent.
+    const user = await this.db.user.findUnique({ where: { id: userId }, select: { id: true } });
+    if (user) {
+      const acc = await this.db.walletAccount.upsert({
+        where: { userId },
+        update: {},
+        create: { userId },
+      });
+      return acc.id;
+    }
+    const virtId = `virtual:${userId}`;
     const acc = await this.db.walletAccount.upsert({
-      where: { userId },
+      where: { id: virtId },
       update: {},
-      create: { userId },
+      create: { id: virtId, userId: null },
     });
     return acc.id;
   }
@@ -190,6 +203,22 @@ export class PrismaWalletStore implements WalletStore {
         }
         const entries: AppliedTransaction['entries'] = [];
         if (op.status === 'SUCCESS') {
+          // Double-entry: maxlen kredit tanpa debit pairs (top-up/callback dari
+          // sumber eksternal) wajib didebit ke vault/suspense internal supaya
+          // invariant Σdebit == Σkredit tetap terjaga di seluruh ledger.
+          const creditTotal = (op.credits ?? []).length * transaction.amount;
+          const debitTotal = (op.debits ?? []).reduce((a, d) => a + d.amount, 0);
+          if (creditTotal > debitTotal) {
+            const suspense = await tx.walletAccount.upsert({
+              where: { id: 'virtual:external-funding-suspense' },
+              update: {},
+              create: { id: 'virtual:external-funding-suspense', userId: null },
+            });
+            await tx.ledgerEntry.create({
+              data: { accountId: suspense.id, transactionId: transaction.id, direction: 'DEBIT', amount: creditTotal - debitTotal },
+            });
+            entries.push({ accountId: suspense.id, direction: 'DEBIT', amount: creditTotal - debitTotal });
+          }
           for (const d of op.debits ?? []) {
             await tx.$queryRaw`SELECT "id" FROM "WalletAccount" WHERE "id" = ${d.accountId} FOR UPDATE`;
             const rows = await tx.ledgerEntry.findMany({ where: { accountId: d.accountId }, select: { direction: true, amount: true } });

@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { TxKind } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../common/prisma.service';
 import { DomainError } from '../common/errors';
 import {
@@ -33,12 +34,24 @@ export class PrismaWalletStore implements WalletStore {
     // tanpa User — dibuat dengan id deterministik supaya idempotent.
     const user = await this.db.user.findUnique({ where: { id: userId }, select: { id: true } });
     if (user) {
-      const acc = await this.db.walletAccount.upsert({
-        where: { userId },
-        update: {},
-        create: { userId },
-      });
-      return acc.id;
+      try {
+        const acc = await this.db.walletAccount.upsert({
+          where: { userId },
+          update: {},
+          create: { userId },
+        });
+        return acc.id;
+      } catch (err) {
+        // Dua request paralel bisa upsert userId sama — upsert unique(userId)
+        // melempar P2002 "Unique constraint failed on the fields: (userId)"
+        // bahkan dengan create kosong. Aman: pemenang membuat baris, yang
+        // kalah cukup baca ulang — hasil tetap konsisten.
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+          const existing = await this.db.walletAccount.findUnique({ where: { userId } });
+          if (existing) return existing.id;
+        }
+        throw err;
+      }
     }
     const virtId = `virtual:${userId}`;
     const acc = await this.db.walletAccount.upsert({

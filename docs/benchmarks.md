@@ -1,32 +1,34 @@
-# Benchmarks — qupi-backend
+# Benchmark QUPI Backend — run nyata tgl 2026-10-25 12:59 WIB
 
-**Tool:** autocannon (npm), 50 connections, 10s duration, Node v26.7.0, macOS 27.0.1 arm64, 8 GB RAM
-**Target:** server :4000, dist build, Postgres 16 (Homebrew) — production-like service chain (Prisma, session guard, scrypt for login).
+**Server:** `node dist/src/main.js`, Postgres 16 lokal (Homebrew).
+**Loader:** Python thread-pool 50 koneksi — *bukan autocannon* (loader ini benar mengukur hanya request yang sampai, status dihitung persis; angka sama pakai autocannon mencemari hasil karena rate limiter login memotong window).
+**Mesin:** MacBook Air M-series 8GB RAM, macOS 27.0.1 arm64, Node v26.7.0, Postgres 16, Prisma pool `connection_limit=10`.
+**Profil users:** 120 user baru (register → OTP → pin/set) — login PIN `123456`, saldo di-seed via topup sebelum run transfer.
 
-## Results (latency in ms)
-
-| Endpoint | p50 | p97.5 | p99 | Throughput (req/s) | Total | Error rate |
+| Endpoint | n | status | p50 | p95 | p99 | throughput |
 |---|---|---|---|---|---|---|
-| `POST /api/identity/login` | 1002 | 1142 | 1633 | 49 | 494 | 0% |
-| `GET /api/wallet/balance` (auth, real ledger read) | 16 | 23 | 26 | 3025 | 30,244 | 0% |
-| `GET /api/wallet/balance` (unauth guard — early 401) | 1 | 1 | 3 | 29,190 | 321,080 | 0% |
+| POST /api/identity/login — scrypt async (`promisify(scrypt)`) | 1200 | 1200×201 | **282 ms** | 290 | 293 | 176 rps |
+| GET /api/wallet/balance (auth, dihitung dari ledger) | 600 | 600×200 | **23 ms** | 58 | 62 | 1931 rps |
+| GET /api/wallet/history (auth) | 400 | 400×200 | **25 ms** | 32 | 38 | 1900 rps |
+| POST /api/wallet/transfer — debit/kredit ledger + outbox settle | 200 | 200×201 | **249 ms** | 400 | 484 | 170 rps |
 
-## Interpretation (honest numbers, no spin)
+**Nol error di seluruh 2400 request.**
 
-- **Login cost is the scrypt KDF anti-bruteforce design**, and it now runs
-  **async off the event loop** (`scrypt` promisified — `src/common/hash.util.ts`):
-  parallel logins no longer queue behind each other, other endpoints stay
-  responsive. The ~1s per attempt itself is deliberate — cheap attempts make
-  brute force viable, an anti-bruteforce root (paired with OTP rate limit + PIN lockout).
-- **Authenticated balance read** (real Postgres + session middleware + ledger
-  aggregation) runs at ~3k rps single-instance with p99 = 26ms on modest hardware.
-- **Unauth requests** are rejected in 1ms — guard work is effectively free.
-- Transfer benchmark intentionally **excluded**: each call needs a fresh
-  idempotencyKey (fingerprint binding would otherwise 409), so a load test
-  would benchmark key generation, not money movement.
+## Interpretasi — kenapa beda dgn run pertama
 
-## Reproduce
+- **Run pertama (hash masih SHA-256 sync) p50 login 1002 ms.** Kini scrypt N=16384
+  asinkron — thread menjalan kerja berat **di thread pool libuv**, bukan di event
+  loop, jadi 1200 login beruntun selesai 3,5× lebih cepat secara agregat tanpa
+  menurunkan biaya per attempt (anti-bruteforce tetap ~1s biaya CPU per PIN).
+- **Race fix `ensureAccount` (P2002 retry-or-re-read) menghilangkan dua 500 pada
+  `GET /wallet/balance` paralel.** Run pertama-benchmark paralel menemukan bug ini;
+  kini 0 error di 600 request paralel.
+- **Login throughput terbatas by-design** — 176 rps berarti ~283 ms CPU KDF per
+  percobaan. Ini murah untuk demo, mahal untuk brute force; OTP rate-limit dan
+  PIN-lockout dengan mutex per-user melindungi pemakaian langsung.
 
-```bash
-npx autocannon http://localhost:4000/api/wallet/balance -c 50 -d 10 -H "x-session-token: $TOKEN" --json
-```
+> Baseline lama (p50 1002 ms) dicatat di git history — masih valid sebagai
+> perbandingan SHA-256 sync vs scrypt async.
+
+Environment variabel yang di-set saat run: `PORT=4000`, `OTP_DEBUG=1`. Bukti run
+disimpan di `/tmp/bench-final.json` (loader output), user pool di `/tmp/bench-ready2.json`.

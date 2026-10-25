@@ -1,33 +1,74 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { WalletService } from './wallet.service';
-import { randomUUID } from 'crypto';
+import { Request } from 'express';
+import { KeyPipe, MoneyPipe } from '../common/pipes';
+import { SessionGuard } from '../common/session.guard';
+import { reqUser } from '../common/req-user';
 
+type User = { id: string };
+
+@UseGuards(SessionGuard)
 @Controller('wallet')
 export class WalletController {
   constructor(private readonly wallet: WalletService) {}
 
-  @Post(':id/topup')
-  async topup(@Param('id') id: string, @Body() body: { amount: number; idempotencyKey?: string }) {
-    const key = body.idempotencyKey ?? randomUUID();
-    const res = await this.wallet.topup(id, body.amount, key);
-    return { message: 'Top up berhasil', data: res };
-  }
-
-  @Post(':id/transfer')
-  async transfer(
-    @Param('id') id: string,
-    @Body() body: { toAccountId: string; amount: number; idempotencyKey?: string },
+  // Top-up BKI sandbox; Idempotency-Key wajib.
+  @Post('topup')
+  async topup(
+    @Req() req: Request,
+    @Body('amount', MoneyPipe) amount: number,
+    @Body('idempotencyKey', KeyPipe) idempotencyKey: string,
   ) {
-    if (!body.idempotencyKey) {
-      throw new Error('idempotencyKey wajib untuk transfer');
-    }
-    const res = await this.wallet.transfer(id, body.toAccountId, body.amount, body.idempotencyKey);
-    return { message: 'Transfer berhasil', data: res };
+    return this.wallet.topupBki((reqUser(req) as User).id, amount, idempotencyKey);
   }
 
-  @Get(':id/balance')
-  async balance(@Param('id') id: string) {
-    const balance = await this.wallet.balance(id);
-    return { message: `Saldo: Rp${balance.toLocaleString('id-ID')}`, data: { balance } };
+  // Status transaksi PENDING (polling sandbox callback).
+  @Get('transactions/:tid')
+  async tx(@Req() req: Request, @Param('tid') tid: string) {
+    return { data: await this.wallet.txStatusOf(tid, (reqUser(req) as User).id) };
+  }
+
+  // Callback sandbox BKI bank untuk menyelesaikan transaksi PENDING.
+  @Post('callback/:tid')
+  async callback(
+    @Req() req: Request,
+    @Param('tid') tid: string,
+    @Body() body: { status: 'SUCCESS' | 'FAILED' },
+  ) {
+    const user = reqUser(req) as User;
+    const t = await this.wallet.txStatusOf(tid, user.id);
+    return t.kind === 'TOPUP' ? this.wallet.topupCallback(tid, body.status) : this.wallet.bankTransferCallback(tid, body.status);
+  }
+
+  @Post('transfer')
+  async transfer(
+    @Req() req: Request,
+    @Body() body: { toUserId: string; amount: number },
+    @Body('idempotencyKey', KeyPipe) idempotencyKey: string,
+  ) {
+    const user = reqUser(req) as User;
+    return this.wallet.transferInternal(user.id, body.toUserId, Number(body.amount), idempotencyKey);
+  }
+
+  @Post('transfer/bank')
+  async transferBank(
+    @Req() req: Request,
+    @Body() body: { bankCode: string; accountNumber: string; toUserId?: string; amount: number },
+    @Body('idempotencyKey', KeyPipe) idempotencyKey: string,
+  ) {
+    const user = reqUser(req) as User;
+    return this.wallet.transferBank(user.id, Number(body.amount), idempotencyKey, body);
+  }
+
+  @Get('balance')
+  async balance(@Req() req: Request) {
+    const bal = await this.wallet.balance((reqUser(req) as User).id);
+    return { message: 'Saldo dihitung dari ledger', data: { balance: bal } };
+  }
+
+  // Riwayat: filter tipe & tanggal & paginasi.
+  @Get('history')
+  async history(@Req() req: Request, @Query() q: { kind?: string; from?: string; to?: string; page?: string; limit?: string }) {
+    return this.wallet.history((reqUser(req) as User).id, q);
   }
 }

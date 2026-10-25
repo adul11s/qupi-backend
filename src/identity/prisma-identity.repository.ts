@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
-import { IdentityRepository, UserRecord } from './identity.repository';
+import { IdentityRepository, OtpRecord, UserRecord } from './identity.repository';
 
 @Injectable()
 export class PrismaIdentityRepository implements IdentityRepository {
@@ -29,11 +29,21 @@ export class PrismaIdentityRepository implements IdentityRepository {
   async createLoginAttempt(data: { userId: string; success: boolean; reason?: string }): Promise<void> {
     await this.db.loginAttempt.create({ data });
   }
-  async createOtp(_code: { userId: string; codeHash: string; purpose: string; expiresAt: Date }): Promise<never> {
-    throw new Error('implementasi penuh OTP via Prisma dibuat pada task berikutnya');
+  async createOtp(code: { userId: string; codeHash: string; purpose: string; expiresAt: Date }): Promise<OtpRecord> {
+    return this.db.otpCode.create({ data: code });
   }
-  async latestOtp(_userId: string, _purpose: string): Promise<null> {
-    return null;
+  async latestOtp(userId: string, purpose: string): Promise<OtpRecord | null> {
+    const list = await this.db.otpCode.findMany({
+      where: { userId, purpose },
+      orderBy: { createdAt: 'desc' },
+      take: 1,
+    });
+    return list[0] ?? null;
   }
-  async consumeOtp(_otpId: string): Promise<void> {}
+  async consumeOtp(otpId: string): Promise<void> {
+    await this.db.otpCode.update({ where: { id: otpId }, data: { consumedAt: new Date() } });
+  }
+  async countOtpInWindow(userId: string, purpose: string, since: Date): Promise<number> {
+    return this.db.otpCode.count({ where: { userId, purpose, createdAt: { gt: since } } });
+  }
 }

@@ -1,43 +1,82 @@
-export type TxKindT = 'TOPUP' | 'TRANSFER' | 'QRIS' | 'BILL' | 'INSTALLMENT' | 'PAYLATER_PURCHASE';
-export interface LedgerOpSide {
+export class InsufficientBalanceError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InsufficientBalanceError';
+  }
+}
+
+interface LedgerOpSide {
   accountId: string;
   amount: number; // selalu positif (rupiah)
 }
 
 export interface ApplyTransactionOp {
   idempotencyKey: string;
-  kind: TxKindT;
+  kind: string;
   counterparty?: string | null;
+  userId?: string | null;
   debits: LedgerOpSide[];
-  credits: LedgerOpSide[];
+  credits: string[]; // accountIds yang dikredit (amount per akun = sama total)
+}
+
+export interface PendingTransactionOp {
+  idempotencyKey: string;
+  kind: string;
+  amount: number;
+  accountId: string;
+  userId?: string | null;
+  counterparty?: string | null;
+}
+
+export interface SettleTransactionOp {
+  transactionId: string;
+  status: 'SUCCESS' | 'FAILED';
+  failReason?: string | null;
+  amount?: number;
+  debits?: LedgerOpSide[];
+  credits?: string[]; // accountIds yang dikredit
 }
 
 export interface AppliedTransaction {
   transactionId: string;
   idempotencyKey: string;
-  status: 'SUCCESS';
+  status: string;
   created: boolean; // false = replay dari idempotency key yang sama
   entries: { accountId: string; direction: 'DEBIT' | 'CREDIT'; amount: number }[];
 }
 
-// Saldo akun dihitung dari ledger, bukan kolom cache.
-export interface WalletStore {
-  /** Debit HARUS dieksekusi di dalam lock atomik agar saldo tidak pernah negatif. */
-  applyTransaction(op: ApplyTransactionOp): Promise<AppliedTransaction>;
-  getBalanceFromLedger(accountId: string): Promise<number>;
+export interface HistoryFilter {
+  kinds?: string[];
+  from?: Date;
+  to?: Date;
+  page: number;
+  limit: number;
 }
 
-export class InsufficientBalanceError extends Error {
-  constructor(msg: string) {
-    super(msg);
-    this.name = 'InsufficientBalanceError';
-  }
+export interface HistoryRow {
+  transactionId: string;
+  kind: string;
+  status: string;
+  direction: string;
+  amount: number;
+  counterparty?: string | null;
+  createdAt: Date;
 }
-export class DuplicateTransactionError extends Error {
-  constructor() {
-    super('Transaksi idempotenti sedang diproses ulang selesai');
-    this.name = 'DuplicateTransactionError';
-  }
+
+// Saldo akun dihitung dari ledger, bukan kolom cache.
+export interface WalletStore {
+  applyTransaction(op: ApplyTransactionOp): Promise<AppliedTransaction>;
+  ensureAccount(userId: string): Promise<string>;
+  accountIdOf(userId: string): Promise<string | null>;
+  createPendingTransaction(op: PendingTransactionOp): Promise<AppliedTransaction>;
+  settleTransaction(op: SettleTransactionOp): Promise<AppliedTransaction>;
+  getTransactionByTid(transactionId: string): Promise<{
+    id: string;
+    status: string;
+    kind: string;
+    failReason?: string | null;
+    counterparty?: string | null;
+  } | null>;
+  getBalanceFromLedger(accountId: string): Promise<number>;
+  history(accountId: string, filter: HistoryFilter): Promise<HistoryRow[]>;
 }
-export const sumLedger = (entries: { direction: string; amount: number }[]): number =>
-  entries.reduce((acc, e) => acc + (e.direction === 'CREDIT' ? e.amount : -e.amount), 0);

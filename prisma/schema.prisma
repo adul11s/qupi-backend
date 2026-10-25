@@ -74,6 +74,7 @@ model User {
   kycDocuments      KycDocument[]
   wallet            WalletAccount?
   payLaterLines     PayLaterLine[]
+  sessions          Session[]
 }
 
 model OtpCode {
@@ -141,8 +142,12 @@ model Transaction {
   status         TxStatus      @default(PENDING)
   amount         Int
   counterparty   String?
+  userId         String?
+  failReason     String?
   createdAt      DateTime      @default(now())
   ledgerEntries  LedgerEntry[]
+
+  @@index([userId, kind, createdAt])
 }
 
 model PayLaterLine {
@@ -157,13 +162,17 @@ model PayLaterLine {
 }
 
 model PayLaterTx {
-  id           String                @id @default(cuid())
-  lineId       String
-  line         PayLaterLine          @relation(fields: [lineId], references: [id])
-  amount       Int
-  tenorMonths  Int                   @default(1)
-  createdAt    DateTime              @default(now())
-  installments PayLaterInstallment[]
+  id             String   @id @default(cuid())
+  lineId         String
+  line           PayLaterLine @relation(fields: [lineId], references: [id])
+  amount         Int
+  totalAmount    Int
+  totalInterest  Int
+  tenorMonths    Int      @default(1)
+  idempotencyKey String   @unique
+  status         String   @default("ACTIVE")
+  createdAt      DateTime @default(now())
+  installments   PayLaterInstallment[]
 }
 
 model PayLaterInstallment {
@@ -173,7 +182,10 @@ model PayLaterInstallment {
   seq         Int
   dueAt       DateTime
   amount      Int
+  penalty     Int               @default(0)
   status      InstallmentStatus @default(UNPAID)
+  paidAt      DateTime?
+  transactionId String?         @unique
 
   @@unique([payLaterTxId, seq])
 }
@@ -186,5 +198,34 @@ model Bill {
   amount        Int
   status        BillStatus   @default(PENDING)
   transactionId String?      @unique
+  inquiryKey    String       @unique
   createdAt     DateTime     @default(now())
+}
+
+model Session {
+  id             String    @id @default(cuid())
+  token          String    @unique
+  userId         String
+  user           User      @relation(fields: [userId], references: [id])
+  lastActivityAt DateTime  @default(now())
+  revokedAt      DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([userId])
+}
+
+model QrisPayment {
+  id            String    @id @default(cuid())
+  userId        String
+  merchantId    String
+  merchantName  String
+  amount        Int
+  status        String    @default("PENDING")
+  qrisPayload   String
+  transactionId String?   @unique
+  expiresAt     DateTime
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([userId])
 }

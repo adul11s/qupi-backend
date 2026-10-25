@@ -1,7 +1,5 @@
 import { UserStatus } from '@prisma/client';
 
-// Record domain (tidak langsung model Prisma) supaya adapter Prisma maupun
-// in-memory memakai kontrak yang sama.
 export type UserStatusT = 'ACTIVE' | 'BLOCKED' | 'LOCKED';
 
 export interface UserRecord {
@@ -32,4 +30,5 @@ export interface IdentityRepository {
   createOtp(code: { userId: string; codeHash: string; purpose: string; expiresAt: Date }): Promise<OtpRecord>;
   latestOtp(userId: string, purpose: string): Promise<OtpRecord | null>;
   consumeOtp(otpId: string): Promise<void>;
+  countOtpInWindow(userId: string, purpose: string, since: Date): Promise<number>;
 }

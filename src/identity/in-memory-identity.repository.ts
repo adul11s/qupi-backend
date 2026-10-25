@@ -54,4 +54,9 @@ export class InMemoryIdentityRepository implements IdentityRepository {
     const o = this.otps.find((x) => x.id === otpId);
     if (o) o.consumedAt = new Date();
   }
+  async countOtpInWindow(userId: string, purpose: string, since: Date): Promise<number> {
+    return this.otps.filter(
+      (o) => o.userId === userId && o.purpose === purpose && o.createdAt >= since && o.consumedAt === null,
+    ).length;
+  }
 }

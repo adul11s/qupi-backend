@@ -2,7 +2,7 @@
 
 # qupi-backend
 
-Backend **QUPI** — fintech wallet + paylater — sebagai **monolith modular NestJS 11**.
+Backend **QUPI — QUick Payment Instrument** — fintech wallet + paylater — sebagai **monolith modular NestJS 11**.
 
 ## Arsitektur
 

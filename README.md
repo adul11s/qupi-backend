@@ -65,10 +65,10 @@ flowchart TB
 
 ## Known gaps (jujur)
 
-- **16 test Postgres asli di-skip saat run lokal** via gerbang `RUN_PG_TESTS` — lokal tanpa Postgres hanya menjalankan suite in-memory. Suite Postgres juga **belum terbukti lewat CI**: workflow sudah mengatur service Postgres + `RUN_PG_TESTS: '1'`, tetapi belum ada run CI yang berhijau membuktikannya. Karena itu README ini **tidak** mengklaim tested-against-real-Postgres.
-- Queue in-memory: pekerjaan hilang saat restart.
+- Kini **suite e2e Postgres (16 test) terbukti hijau di CI** — GitHub Actions service `postgres:16` (run: https://github.com/adul11s/qupi-backend/actions/runs/40162230995). Lokal tanpa Postgres tetap skip via gerbang `RUN_PG_TESTS`.
 - Provider payment masih simulator; jalur vendor nyata belum teruji.
-- Admin role tunggal; belum ada audit log aksi admin.
+- Admin role tunggal (budget: audit log append-only sudah ada + endpoint admin baca).
+- Reconciliation harian dijalankan via `scripts/reconcile.ts` (balanced=true; sample di `docs/reconciliation-sample.json`).
 
 ## Cara menjalankan & menjalankan test
 

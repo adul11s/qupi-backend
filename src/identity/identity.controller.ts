@@ -1,5 +1,5 @@
 import {
-  Body, Controller, ForbiddenException, Get, Param, Post, UnauthorizedException, UseGuards, Req,
+  Body, Controller, ForbiddenException, Get, Param, Post, UnauthorizedException, UseGuards, Req, Query, BadRequestException, NotFoundException,
 } from '@nestjs/common';
 import { IdentityService } from './identity.service';
 import { PrismaService } from '../common/prisma.service';
@@ -119,6 +119,15 @@ export class IdentityController {
       orderBy: { createdAt: 'desc' },
     });
     return { data: docs };
+  }
+
+  // Cari user tujuan transfer (by phone) — dipakai halaman transfer frontend.
+  @Get('lookup')
+  async lookup(@Query('phone') phone: string) {
+    if (!phone) throw new BadRequestException('Parameter phone wajib diisi');
+    const u = await this.identity.byPhone(phone);
+    if (!u) throw new NotFoundException('User tidak ditemukan');
+    return { data: { id: u.id, phone: u.phone, name: u.name } };
   }
 }
 

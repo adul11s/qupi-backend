@@ -29,6 +29,11 @@ export class IdentityService {
     return this.repo.createUser({ phone, name: name.trim() });
   }
 
+  // Untuk lookup penerima transfer (controller /lookup).
+  async byPhone(phone: string): Promise<UserRecord> {
+    return (await this.repo.findUserByPhone(phone)) as UserRecord;
+  }
+
   // OTP berlaku 5 menit, maksimal 3 permintaan per menit (hitung OTP baru
   // dalam jendela 60 detik, tanpa pedoman sekadar "terakhir").
   async requestOtp(userId: string, purpose = 'LOGIN'): Promise<{ expiresInMinutes: number; otp?: string }> {

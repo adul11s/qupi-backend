@@ -1,4 +1,4 @@
-import { ArgumentMetadata, BadRequestException, Injectable, ParseIntPipe, PipeTransform } from '@nestjs/common';
+import { ArgumentMetadata, BadRequestException, PipeTransform } from '@nestjs/common';
 
 // Pastikan nominal uang selalu integer rupiah positif.
 export class MoneyPipe implements PipeTransform {

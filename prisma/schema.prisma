@@ -68,8 +68,9 @@ model User {
   pinHash           String?
   failedPinAttempts Int            @default(0)
   isAdmin           Boolean        @default(false)
-  // Fase-2 #7: data produk limit/income & tier (T1 saldo max 10jt, T2 max 20jt).
-  monthlyIncome     Int            @default(4000000)
+  // Fase-3 #5: default 4jt DIHAPUS — penghasilan harus diverifikasi admin
+  // (POST /admin/users/:id/income) sebelum limit PayLater dapat dihitung.
+  monthlyIncome     Int?
   kycTier           String         @default("T1")
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
@@ -148,7 +149,10 @@ model Transaction {
   counterparty   String?
   userId         String?
   failReason     String?
-  createdAt      DateTime      @default(now())
+  // Fase-3 #2: idempotency key di-bind ke payload (fingerprint) — replay hanya
+  // jika key sama DAN fingerprint sama; beda fingerprint → 409 IDEM_CONFLICT.
+  fingerprint    String?
+  createdAt      DateTime @default(now())
   ledgerEntries  LedgerEntry[]
 
   @@index([userId, kind, createdAt])
@@ -174,6 +178,8 @@ model PayLaterTx {
   totalInterest  Int
   tenorMonths    Int      @default(1)
   idempotencyKey String   @unique
+  // Fase-3 #2: binding idempotensi ke payload (lihat Transaction.fingerprint).
+  fingerprint    String?
   status         String   @default("ACTIVE")
   createdAt      DateTime @default(now())
   installments   PayLaterInstallment[]

@@ -9,6 +9,7 @@ import { providerMode, tierCapFor } from '../common/config';
 import { RiskService } from '../risk/risk.module';
 import { PrismaService } from '../common/prisma.service';
 import { QueueService } from '../queue/queue.service';
+import { makeFingerprint } from '../common/idempotency';
 
 export const WALLET_STORE = 'WALLET_STORE';
 
@@ -64,6 +65,7 @@ export class WalletService {
       accountId,
       userId,
       counterparty: 'BKI-SANDBOX',
+      fingerprint: makeFingerprint(userId, 'TOPUP', amount, 'BKI-SANDBOX'),
     });
     if (!pending.created) {
       return { message: 'Top up sudah pernah diproses (idempoten)', data: await this.store.getTransactionByTid(pending.transactionId) };
@@ -85,10 +87,12 @@ export class WalletService {
     return { message: 'Top up berhasil', data: await this.store.getTransactionByTid(settled.transactionId) };
   }
 
-  // Callback sandbox BKI: menyudahkan transaksi TAHAN PENDING.
+  // Callback sandbox BKI (fase-3 #1: dipanggil HANYA dari webhook internal
+  // InternalCallbackController dengan HMAC terverifikasi — bukan dari user).
   async topupCallback(transactionId: string, status: 'SUCCESS' | 'FAILED') {
     const t = await this.store.getTransactionByTid(transactionId);
     if (!t || !t.userId || typeof t.amount !== "number") throw new DomainError("TX_NOT_FOUND", "Transaksi tidak ditemukan");
+    if (t.kind !== 'TOPUP') throw new DomainError('TX_KIND_MISMATCH', 'Webhook ini hanya untuk transaksi TOPUP', 400 as never);
     // kredit ke account milik user (ledger), bukan kosong.
     await this.store.settleTransaction({
       transactionId,
@@ -111,6 +115,7 @@ export class WalletService {
         kind: 'TRANSFER',
         userId,
         counterparty: toUserId,
+        fingerprint: makeFingerprint(userId, 'TRANSFER', amount, toUserId),
         debits: [{ accountId: from, amount }],
         credits: [to],
       });
@@ -135,6 +140,7 @@ export class WalletService {
       accountId: from,
       userId,
       counterparty,
+      fingerprint: makeFingerprint(userId, 'TRANSFER_BANK', amount, counterparty),
     });
     if (!pending.created) {
       return { message: 'Transfer sudah pernah diproses (idempoten)', data: await this.store.getTransactionByTid(pending.transactionId) };

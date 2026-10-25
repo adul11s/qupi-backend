@@ -1,4 +1,4 @@
-import { Injectable, Module } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 
 // Queue stub ala BullMQ: antrean in-process dengan interval worker.
 // Kesediaan Redis/BULLMQ asli menyusul saat REDIS_QUEUE=1.

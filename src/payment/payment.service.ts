@@ -5,6 +5,8 @@ import { WalletStore } from '../wallet/wallet.store';
 import { DomainError } from '../common/errors';
 import { opts, providerMode } from '../common/config';
 import { QueueService } from '../queue/queue.service';
+import { makeFingerprint } from '../common/idempotency';
+import { assertDti } from '../common/dti';
 
 export interface InquiryInfo {
   inquiryId: string;
@@ -99,17 +101,34 @@ export class PaymentService {
     if (![1, 3, 6].includes(tenorMonths)) throw new DomainError('TENOR_INVALID', 'Tenor harus 1, 3, atau 6 bulan');
     const line = await this.db.payLaterLine.findUnique({ where: { userId } });
     if (!line?.activated) throw new DomainError('PAYLATER_NOT_ACTIVE', 'PayLater belum aktif');
-    if (line.used + qris.amount > line.limitAmount) throw new DomainError('LIMIT_EXCEEDED', 'Limit PayLater tidak mencukupi');
+    // Fase-3 #2: fingerprint QRIS-paylater = user+nominal+qris yang dibayar.
+    const fingerprint = makeFingerprint(userId, 'QRIS_PAYLATER', qris.amount, qrisId);
     const totalInterest = tenorMonths === 1 ? 0 : Math.round((qris.amount * tenorMonths) / 100); // 1% per bulan utk tenor >1
     const totalAmount = qris.amount + totalInterest;
     const payLaterTxId = await this.db.$transaction(async (tx): Promise<string> => {
       const existing = await tx.payLaterTx.findUnique({ where: { idempotencyKey: o.idempotencyKey } });
-      if (existing) return existing.id;
+      if (existing) {
+        // Fase-3 #2: key sama tapi payload beda → 409, jangan replay salah.
+        if (!existing.fingerprint || existing.fingerprint !== fingerprint) {
+          throw new DomainError('IDEM_CONFLICT', 'Idempotency key dipakai untuk request berbeda (fingerprint tidak cocok)', 409 as never);
+        }
+        return existing.id;
+      }
+      // Fase-3 #5: DTI juga di QRIS PayLater — cicilan/bulan ≤ 25% penghasilan.
+      const freshUser = await tx.user.findUniqueOrThrow({ where: { id: userId } });
+      assertDti(freshUser.monthlyIncome, Math.round(totalAmount / tenorMonths));
+      // Fase-3 #4: guard limit KONDISIONAL di dalam transaksi yang sama
+      // (bukan cek-then-write di luar) — okeelah race paralel tetap aman.
+      const upd = await tx.payLaterLine.updateMany({
+        where: { id: line.id, used: { lte: line.limitAmount - qris.amount } },
+        data: { used: { increment: qris.amount } },
+      });
+      if (upd.count === 0) throw new DomainError('LIMIT_EXCEEDED', 'Limit PayLater tidak mencukupi');
       // Fase-2 #3: guard kondisional QRIS di dalam transaksi RBM yang sama.
       const claim = await tx.qrisPayment.updateMany({ where: { id: qrisId, status: 'PENDING' }, data: { status: 'PAID' } });
       if (claim.count === 0) throw new DomainError('QRIS_USED', 'QRIS sudah dipakai', 400 as never);
       const pl = await tx.payLaterTx.create({
-        data: { lineId: line.id, amount: qris.amount, totalAmount, totalInterest, tenorMonths, idempotencyKey: o.idempotencyKey },
+        data: { lineId: line.id, amount: qris.amount, totalAmount, totalInterest, tenorMonths, idempotencyKey: o.idempotencyKey, fingerprint },
       });
       const per = Math.round(totalAmount / tenorMonths);
       for (let seq = 1; seq <= tenorMonths; seq++) {
@@ -122,7 +141,6 @@ export class PaymentService {
           },
         });
       }
-      await tx.payLaterLine.update({ where: { id: line.id }, data: { used: { increment: qris.amount } } });
       await tx.qrisPayment.update({ where: { id: qrisId }, data: { status: 'PAID' } });
       return pl.id;
     });
@@ -189,8 +207,11 @@ export class PaymentService {
   async payBill(userId: string, inquiryId: string, method: 'BALANCE' | 'PAYLATER', idempotencyKey: string) {
     const bill = await this.db.bill.findUnique({ where: { id: inquiryId } });
     if (!bill) throw new DomainError('BILL_NOT_FOUND', 'Inquiry tagihan tidak ditemukan');
+    if (bill.userId !== userId) throw new DomainError('FORBIDDEN', 'Tagihan bukan milik akun ini', 403 as never);
     if (bill.status !== 'PENDING') throw new DomainError('BILL_PAID', 'Tagihan sudah dibayar', 400 as never);
     const total = bill.amount + 2_500;
+    // Fase-3 #2: fingerprint BILL = user+total+inquiryId yang dibayar.
+    const fingerprint = makeFingerprint(userId, 'BILL', total, bill.id);
     // Fase-2 #3: claim kondisional PENDING->PAID atomik — bayar dobel → 400.
     const claim = await this.db.bill.updateMany({
       where: { id: bill.id, status: 'PENDING' },
@@ -205,6 +226,7 @@ export class PaymentService {
           kind: 'BILL',
           userId,
           counterparty: bill.provider,
+          fingerprint,
           debits: [{ accountId: account, amount: total }],
           credits: [await this.store.ensureAccount('bill-provider-treasury')],
         });
@@ -213,6 +235,8 @@ export class PaymentService {
       }
       const line = await this.db.payLaterLine.findUnique({ where: { userId } });
       if (!line?.activated) throw new DomainError('PAYLATER_NOT_ACTIVE', 'PayLater belum aktif');
+      // Fase-3 #2/#4: fingerprint BILL-paylater + guard limit kondisional + DTI.
+      const fingerprintPl = makeFingerprint(userId, 'BILL_PAYLATER', total, bill.id);
       // Fase-2 #3: cek limit + buat cicilan DALAM SATU transaksi (atom).
       const payLaterTx = await this.db.$transaction(async (tx): Promise<{ id: string }> => {
         const upd = await tx.payLaterLine.updateMany({
@@ -221,7 +245,15 @@ export class PaymentService {
         });
         if (upd.count === 0) throw new DomainError('LIMIT_EXCEEDED', 'Limit PayLater tidak mencukupi');
         const existing = await tx.payLaterTx.findUnique({ where: { idempotencyKey } });
-        if (existing) return { id: existing.id };
+        if (existing) {
+          // Fase-3 #2: key sama tapi payload beda → 409, jangan tandai lunas tagihan lain.
+          if (!existing.fingerprint || existing.fingerprint !== fingerprintPl) {
+            throw new DomainError('IDEM_CONFLICT', 'Idempotency key dipakai untuk request berbeda (fingerprint tidak cocok)', 409 as never);
+          }
+          return { id: existing.id };
+        }
+        const freshUser = await tx.user.findUniqueOrThrow({ where: { id: userId } });
+        assertDti(freshUser.monthlyIncome, total);
         const pl = await tx.payLaterTx.create({
           data: {
             lineId: line.id,
@@ -230,6 +262,7 @@ export class PaymentService {
             totalInterest: 0,
             tenorMonths: 1,
             idempotencyKey,
+            fingerprint: fingerprintPl,
           },
         });
         await tx.payLaterInstallment.create({

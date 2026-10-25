@@ -1,18 +1,16 @@
 import {
-  Body, Controller, ForbiddenException, Get, HttpCode, Param, Post, UnauthorizedException, UseGuards, Req, Query, BadRequestException, NotFoundException,
+  Body, Controller, ForbiddenException, Get, HttpCode, Post, UnauthorizedException, Req, Query, BadRequestException, NotFoundException,
 } from '@nestjs/common';
 import { IdentityService } from './identity.service';
 import { PrismaService } from '../common/prisma.service';
 import { SessionService } from '../common/session.service';
-import { Public, SessionGuard } from '../common/session.guard';
+import { Public } from '../common/session.guard';
 import { Request } from 'express';
 import { mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { KycStatus } from '@prisma/client';
 import { reqUser } from '../common/req-user';
-
-const uid = (req: Request): string => reqUser(req).id;
 
 @Controller('identity')
 export class IdentityController {
@@ -144,13 +142,15 @@ export class IdentityController {
     return { data: docs };
   }
 
-  // Cari user tujuan transfer (by phone) — dipakai halaman transfer frontend.
+  // Cari user tujuan transfer (by phone) — fase-3 #6: TIDAK bocorkan nama penuh,
+  // hanya id + nama ter-obfuskasi (2 karakter awal, sisanya ***).
   @Get('lookup')
   async lookup(@Query('phone') phone: string) {
     if (!phone) throw new BadRequestException('Parameter phone wajib diisi');
     const u = await this.identity.byPhone(phone);
     if (!u) throw new NotFoundException('User tidak ditemukan');
-    return { data: { id: u.id, phone: u.phone, name: u.name } };
+    const obf = `${String(u.name).slice(0, 2)}***`;
+    return { data: { id: u.id, name: obf } };
   }
 }
 

@@ -5,6 +5,8 @@ import { opts } from '../common/config';
 import { WALLET_STORE, WalletService } from '../wallet/wallet.service';
 import { WalletStore } from '../wallet/wallet.store';
 import { KycStatus } from '@prisma/client';
+import { makeFingerprint } from '../common/idempotency';
+import { assertDti } from '../common/dti';
 
 const TENORS = [1, 3, 6] as const;
 
@@ -26,8 +28,10 @@ export class CreditService {
     const kyc = await this.db.kycDocument.findFirst({ where: { userId, kind: 'KTP', status: KycStatus.APPROVED } });
     if (!kyc) throw new DomainError('KYC_NOT_APPROVED', 'KTP belum disetujui admin', 403 as never);
     const user = await this.db.user.findUnique({ where: { id: userId } });
-    const income = user?.monthlyIncome ?? 0;
-    if (!income) throw new DomainError('NO_INCOME_DATA', 'Penghasilan belum terverifikasi, hubungi admin setelah verify Tier 2');
+    const income = user?.monthlyIncome;
+    // Fase-3 #5: penghasilan TIDAK berdefault — tanpa verifikasi admin,
+    // limit tidak dihitung dan aktivasi ditolak (NO_INCOME_DATA).
+    if (income == null) throw new DomainError('NO_INCOME_DATA', 'Penghasilan belum terverifikasi, hubungi admin setelah verify Tier 2');
     const o = opts();
     const raw = Math.round(income * o.paylaterLimitMultiplier);
     return Math.min(o.paylaterLimitMax, Math.max(o.paylaterLimitMin, raw));
@@ -49,6 +53,7 @@ export class CreditService {
   }
 
   async activate(userId: string) {
+    // Fase-3 #5: tanpa penghasilan terverifikasi (NULL) → aktivasi diblok.
     const limit = await this.computeLimit(userId);
     const line = await this.db.payLaterLine.upsert({
       where: { userId },
@@ -75,8 +80,14 @@ export class CreditService {
   async checkout(userId: string, amount: number, tenorMonths: number, idempotencyKey: string) {
     if (!Number.isInteger(amount) || amount <= 0) throw new BadRequestException('Nominal harus integer rupiah > 0');
     if (!TENORS.includes(tenorMonths as 1 | 3 | 6)) throw new DomainError('TENOR_INVALID', 'Tenor harus 1, 3, atau 6 bulan');
+    // Fase-3 #2: fingerprint checkout = user+nominal+tenor (payload binding).
+    const fingerprint = makeFingerprint(userId, 'CHECKOUT', amount, `tenor:${tenorMonths}`);
     const existing = await this.db.payLaterTx.findUnique({ where: { idempotencyKey }, include: { installments: true } });
     if (existing) {
+      // key sama tapi payload beda → 409 IDEM_CONFLICT, jangan replay salah.
+      if (!existing.fingerprint || existing.fingerprint !== fingerprint) {
+        throw new DomainError('IDEM_CONFLICT', 'Idempotency key dipakai untuk request berbeda (fingerprint tidak cocok)', 409 as never);
+      }
       return { message: 'Checkout sudah pernah diproses (idempoten)', data: { payLaterTxId: existing.id, installments: existing.installments.length, replay: true } };
     }
     const line = await this.ensureLine(userId);
@@ -89,12 +100,10 @@ export class CreditService {
 
     try {
       const payLaterTx = await this.db.$transaction(async (tx): Promise<string> => {
-        // Fase-2 #7 DTI: cicilan per bulan ≤ 25% penghasilan (gaji).
+        // Fase-2 #7 DTI: cicilan per bulan ≤ 25% penghasilan (gaji) — Fase-3:
+        // NULL berarti belum terverifikasi → block (NO_INCOME_DATA).
         const freshUser = await tx.user.findUniqueOrThrow({ where: { id: userId } });
-        const maxPerInstallment = Math.floor(freshUser.monthlyIncome * 0.25);
-        if (per > maxPerInstallment) {
-          throw new DomainError('DTI_EXCEEDED', `Cicilan per bulan Rp${per.toLocaleString('id-ID')} melebihi 25% penghasilan (maks Rp${maxPerInstallment.toLocaleString('id-ID')})`, 400 as never);
-        }
+        assertDti(freshUser.monthlyIncome, per);
         // Guard limit atomik: update sekali kondisional; dua request paralel →
         // hanya satu yang mengurangi limit, sisanya LIMIT_EXCEEDED (rollback).
         const upd = await tx.payLaterLine.updateMany({
@@ -103,7 +112,7 @@ export class CreditService {
         });
         if (upd.count === 0) throw new DomainError('LIMIT_EXCEEDED', 'Limit PayLater tidak mencukupi');
         const pl = await tx.payLaterTx.create({
-          data: { lineId: line.id, amount, totalAmount, totalInterest, tenorMonths, idempotencyKey },
+          data: { lineId: line.id, amount, totalAmount, totalInterest, tenorMonths, idempotencyKey, fingerprint },
         });
         for (let seq = 1; seq <= tenorMonths; seq++) {
           const amt = seq === tenorMonths ? totalAmount - per * (tenorMonths - 1) : per;
@@ -118,7 +127,11 @@ export class CreditService {
       // Race idempotency di DB (P2002) → REPLAY bukan 500.
       if (typeof e === 'object' && e !== null && (e as { code?: string }).code === 'P2002') {
         const existing = await this.db.payLaterTx.findUnique({ where: { idempotencyKey } });
-        if (existing) return { message: 'Checkout sudah pernah diproses (idempoten)', data: { payLaterTxId: existing.id, replay: true } };
+        if (existing) {
+          const ok = existing.fingerprint && existing.fingerprint === fingerprint;
+          if (!ok) throw new DomainError('IDEM_CONFLICT', 'Idempotency key dipakai untuk request berbeda (fingerprint tidak cocok)', 409 as never);
+          return { message: 'Checkout sudah pernah diproses (idempoten)', data: { payLaterTxId: existing.id, replay: true } };
+        }
       }
       throw e;
     }
@@ -163,6 +176,7 @@ export class CreditService {
         kind: 'INSTALLMENT',
         userId,
         counterparty: inst.payLaterTxId,
+        fingerprint: makeFingerprint(userId, 'INSTALLMENT', total, inst.payLaterTxId),
         debits: [{ accountId: await this.store.ensureAccount(userId), amount: total }],
         credits: [await this.store.ensureAccount('paylater-treasury')],
       });
@@ -176,12 +190,13 @@ export class CreditService {
       await this.db.payLaterLine.update({ where: { id: inst.payLaterTx.lineId }, data: { used: { decrement: inst.payLaterTx.amount } } });
       return { message: `Cicilan berhasil dibayar (total ${total.toLocaleString('id-ID')} ${fresh.penalty ? 'termasuk denda' : ''})`, data: { installmentId, total, penalty: fresh.penalty } };
     } catch (e: unknown) {
+      // Fase-3 #4: rollback claim pada error APA PUN (bukan hanya saldo kurang) —
+      // cicilan tidak boleh stuck PAID tanpa debit ledger.
+      await this.db.payLaterInstallment.update({
+        where: { id: installmentId },
+        data: { status: inst.status, paidAt: null, transactionId: null, penalty: fresh.penalty },
+      });
       if (e instanceof Error && e.name === 'InsufficientBalanceError') {
-        // rollback claim: cicilan kembali ke status sebelumnya (tidak stuck PAID).
-        await this.db.payLaterInstallment.update({
-          where: { id: installmentId },
-          data: { status: inst.status, paidAt: null, transactionId: null, penalty: fresh.penalty },
-        });
         throw new DomainError('INSUFFICIENT_BALANCE', 'Saldo tidak mencukupi untuk cicilan', 400 as never);
       }
       throw e;

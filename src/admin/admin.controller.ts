@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 import { SessionGuard } from '../common/session.guard';
 import { AdminRoleGuard } from '../common/admin-role.guard';
@@ -68,5 +68,20 @@ export class AdminController {
     if (Object.keys(patch).length === 0) throw new DomainError('NOTHING_TO_UPDATE', 'Tidak ada perubahan', 400 as never);
     const user = await this.db.user.update({ where: { id }, data: patch });
     return { message: 'Data limit user diperbarui', data: { id: user.id, monthlyIncome: user.monthlyIncome, kycTier: user.kycTier } };
+  }
+
+  // Fase-3 #5: endpoint khusus set penghasilan TERVERIFIKASI admin.
+  // monthlyIncome tidak lagi punya default — limit PayLater hanya terbit
+  // setelah admin menset verifiedIncome lewat endpoint ini.
+  @Post('users/:id/income')
+  async setVerifiedIncome(
+    @Param('id') id: string,
+    @Body() body: { verifiedIncome: number },
+  ) {
+    if (body.verifiedIncome === undefined || !Number.isInteger(body.verifiedIncome) || body.verifiedIncome <= 0) {
+      throw new DomainError('INCOME_INVALID', 'verifiedIncome harus integer rupiah > 0', 400 as never);
+    }
+    const user = await this.db.user.update({ where: { id }, data: { monthlyIncome: body.verifiedIncome } });
+    return { message: 'Penghasilan terverifikasi tersimpan', data: { id: user.id, monthlyIncome: user.monthlyIncome } };
   }
 }

@@ -13,6 +13,9 @@ interface LedgerOpSide {
 export interface ApplyTransactionOp {
   idempotencyKey: string;
   kind: string;
+  // Fase-3 #2: fingerprint payload (userId+kind+amount+counterparty) — replay
+  // hanya sah jika fingerprint sama; beda → IDEM_CONFLICT 409.
+  fingerprint?: string;
   counterparty?: string | null;
   userId?: string | null;
   debits: LedgerOpSide[];
@@ -22,6 +25,8 @@ export interface ApplyTransactionOp {
 export interface PendingTransactionOp {
   idempotencyKey: string;
   kind: string;
+  // Fase-3 #2: fingerprint payload untuk binding idempotensi (lihat atas).
+  fingerprint?: string;
   amount: number;
   accountId: string;
   userId?: string | null;

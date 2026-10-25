@@ -8,6 +8,18 @@ import {
   HistoryFilter,
   HistoryRow,
 } from './wallet.store';
+import { DomainError } from '../common/errors';
+
+// Fase-3 #2: binding idempotensi ke payload — key sama dengan fingerprint beda
+// ditolak 409 IDEM_CONFLICT (tidak di-replay, jangan salah-debit).
+const assertFingerprint = (
+  stored: string | undefined,
+  given: string | undefined,
+): void => {
+  if (!stored || stored !== given) {
+    throw new DomainError('IDEM_CONFLICT', 'Idempotency key dipakai untuk request berbeda (fingerprint tidak cocok)', 409 as never);
+  }
+};
 
 interface Entry {
   accountId: string;
@@ -26,9 +38,16 @@ interface Entry {
 let seq = 0;
 export class InMemoryWalletStore implements WalletStore {
   entries: Entry[] = [];
-  transactions: Map<string, { id: string; idempotencyKey: string; status: string; kind: string }> = new Map();
+  transactions: Map<string, { id: string; idempotencyKey: string; status: string; kind: string; fingerprint?: string }> = new Map();
   accounts = new Map<string, { id: string; userId: string }>();
   private locks = new Map<string, Promise<unknown>>();
+
+  // Fase-3 #2: replay hanya jika stored fingerprint === op fingerprint.
+  private checkFingerprint(txId: string, given?: string): void {
+    const t = [...this.transactions.values()].find((x) => x.id === txId);
+    if (!t) throw new DomainError('TX_NOT_FOUND', 'Transaksi tidak ditemukan');
+    assertFingerprint(t.fingerprint, given);
+  }
 
   private nid(): string {
     seq += 1;
@@ -91,12 +110,18 @@ export class InMemoryWalletStore implements WalletStore {
 
   async applyTransaction(op: ApplyTransactionOp): Promise<AppliedTransaction> {
     const existed = this.transactions.get(op.idempotencyKey);
-    if (existed) return this.replay(existed.id);
+    if (existed) {
+      this.checkFingerprint(existed.id, op.fingerprint);
+      return this.replay(existed.id);
+    }
     return this.withLock(
       op.debits.map((d) => d.accountId),
       async () => {
         const again = this.transactions.get(op.idempotencyKey);
-        if (again) return this.replay(again.id);
+        if (again) {
+          this.checkFingerprint(again.id, op.fingerprint);
+          return this.replay(again.id);
+        }
         for (const d of op.debits) {
           if (this.balanceOf(d.accountId) < d.amount) {
             throw new InsufficientBalanceError(`Saldo tidak mencukupi untuk akun ${d.accountId}`);
@@ -109,6 +134,7 @@ export class InMemoryWalletStore implements WalletStore {
           idempotencyKey: op.idempotencyKey,
           status: 'SUCCESS',
           kind: op.kind,
+          fingerprint: op.fingerprint,
         });
         const entries = this.writeEntries(txId, op.debits, op.credits, debitsTotal);
         return { transactionId: txId, idempotencyKey: op.idempotencyKey, status: 'SUCCESS', created: true, entries };
@@ -118,16 +144,23 @@ export class InMemoryWalletStore implements WalletStore {
 
   async createPendingTransaction(op: PendingTransactionOp): Promise<AppliedTransaction> {
     const existed = this.transactions.get(op.idempotencyKey);
-    if (existed) return this.replay(existed.id);
+    if (existed) {
+      this.checkFingerprint(existed.id, op.fingerprint);
+      return this.replay(existed.id);
+    }
     return this.withLock([], async () => {
       const again = this.transactions.get(op.idempotencyKey);
-      if (again) return this.replay(again.id);
+      if (again) {
+        this.checkFingerprint(again.id, op.fingerprint);
+        return this.replay(again.id);
+      }
       const txId = this.nid();
       this.transactions.set(op.idempotencyKey, {
         id: txId,
         idempotencyKey: op.idempotencyKey,
         status: 'PENDING',
         kind: op.kind,
+        fingerprint: op.fingerprint,
       });
       this.entries.push({
         accountId: op.accountId,

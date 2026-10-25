@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { TxKind } from '@prisma/client';
 import { PrismaService } from '../common/prisma.service';
+import { DomainError } from '../common/errors';
 import {
   ApplyTransactionOp,
   AppliedTransaction,
@@ -44,6 +45,20 @@ export class PrismaWalletStore implements WalletStore {
     return { transactionId: t.id, idempotencyKey: t.idempotencyKey, status: 'SUCCESS', created: false, entries };
   }
 
+  // Fase-3 #2: key sama tapi race paralel P2002 tetap membandingkan fingerprint.
+  private replayWithFingerprint(
+    existing: { id: string; idempotencyKey: string; fingerprint?: string | null },
+    op: { fingerprint?: string },
+    entries: { accountId: string; direction: 'DEBIT' | 'CREDIT'; amount: number }[],
+  ): AppliedTransaction {
+    // Fingerprint lama yang belum ter-set (kolom baru nullable) tidak dianggap cocok:
+    // key dipakai ulang lintas niat memang harus ditolak (409 IDEM_CONFLICT).
+    if (!existing.fingerprint || existing.fingerprint !== op.fingerprint) {
+      throw new DomainError('IDEM_CONFLICT', 'Idempotency key dipakai untuk request berbeda (fingerprint tidak cocok)', 409 as never);
+    }
+    return this.replayOf(existing, entries);
+  }
+
   async applyTransaction(op: ApplyTransactionOp): Promise<AppliedTransaction> {
     try {
       return await this.doApplyTransaction(op);
@@ -54,7 +69,7 @@ export class PrismaWalletStore implements WalletStore {
         const existing = await this.db.transaction.findUnique({ where: { idempotencyKey: op.idempotencyKey } });
         if (existing) {
           const entries = await this.db.ledgerEntry.findMany({ where: { transactionId: existing.id } });
-          return this.replayOf(existing, entries.map((en) => ({
+          return this.replayWithFingerprint(existing, op, entries.map((en) => ({
             accountId: en.accountId,
             direction: en.direction as 'DEBIT' | 'CREDIT',
             amount: en.amount,
@@ -71,17 +86,11 @@ export class PrismaWalletStore implements WalletStore {
         const existing = await tx.transaction.findUnique({ where: { idempotencyKey: op.idempotencyKey } });
         if (existing) {
           const entries = await tx.ledgerEntry.findMany({ where: { transactionId: existing.id } });
-          return {
-            transactionId: existing.id,
-            idempotencyKey: existing.idempotencyKey,
-            status: 'SUCCESS',
-            created: false,
-            entries: entries.map((e) => ({
-              accountId: e.accountId,
-              direction: e.direction as 'DEBIT' | 'CREDIT',
-              amount: e.amount,
-            })),
-          };
+          return this.replayWithFingerprint(existing, op, entries.map((e) => ({
+            accountId: e.accountId,
+            direction: e.direction as 'DEBIT' | 'CREDIT',
+            amount: e.amount,
+          })));
         }
         // total debits harus sama dengan total credits (double-entry lagi)
         const debitsTotal = op.debits.reduce((a, d) => a + d.amount, 0);
@@ -106,6 +115,7 @@ export class PrismaWalletStore implements WalletStore {
             amount: debitsTotal || op.credits.length,
             counterparty: op.counterparty ?? null,
             userId: op.userId ?? null,
+            fingerprint: op.fingerprint ?? null,
           },
         });
         const entries: AppliedTransaction['entries'] = [];
@@ -142,6 +152,7 @@ export class PrismaWalletStore implements WalletStore {
           amount: op.amount,
           counterparty: op.counterparty ?? null,
           userId: op.userId ?? null,
+          fingerprint: op.fingerprint ?? null,
         },
       });
       // tandai account id di field counterparty supaya polos
@@ -150,6 +161,7 @@ export class PrismaWalletStore implements WalletStore {
       if (typeof e === 'object' && e !== null && (e as { code?: string }).code === 'P2002') {
         const existing = await this.db.transaction.findUnique({ where: { idempotencyKey: op.idempotencyKey } });
         if (existing) {
+          this.replayWithFingerprint(existing, op, []);
           return {
             transactionId: existing.id,
             idempotencyKey: existing.idempotencyKey,

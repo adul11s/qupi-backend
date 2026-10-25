@@ -38,17 +38,8 @@ export class WalletController {
     return { data: await this.wallet.txStatusOf(tid, (reqUser(req) as User).id) };
   }
 
-  // Callback sandbox BKI bank untuk menyelesaikan transaksi PENDING.
-  @Post('callback/:tid')
-  async callback(
-    @Req() req: Request,
-    @Param('tid') tid: string,
-    @Body() body: { status: 'SUCCESS' | 'FAILED' },
-  ) {
-    const user = reqUser(req) as User;
-    const t = await this.wallet.txStatusOf(tid, user.id);
-    return t.kind === 'TOPUP' ? this.wallet.topupCallback(tid, body.status) : this.wallet.bankTransferCallback(tid, body.status);
-  }
+  // Fase-3 #1: callback DIHAPUS dari jalur user — pindah ke webhook internal
+  // POST /internal/callback/topup/:tid dengan x-internal-signature (HMAC-SHA256).
 
   @Post('transfer')
   async transfer(

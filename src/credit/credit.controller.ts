@@ -1,7 +1,7 @@
-import { Body, Controller, ForbiddenException, Get, Param, Post, Req, UseGuards, Query, HttpCode } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, Get, Param, Post, Req, UseGuards } from '@nestjs/common';
 import { CreditService } from './credit.service';
 import { KeyPipe, MoneyPipe } from '../common/pipes';
-import { SessionGuard, Public } from '../common/session.guard';
+import { SessionGuard } from '../common/session.guard';
 import { PinService } from '../common/pin.service';
 import { reqUser } from '../common/req-user';
 import { Request } from 'express';
@@ -21,8 +21,12 @@ export class CreditController {
   }
 
   @Post('paylater/activate')
-  async activate(@Req() req: Request) {
-    return this.credit.activate(reqUser(req).id);
+  async activate(@Req() req: Request, @Body() body: { pin: string }) {
+    const user = reqUser(req);
+    // Fase-3 #6: aktivasi wajib verifikasi PIN (UI meminta PIN, endpoint kini cek).
+    this.pin.assertFormat(body.pin);
+    await this.pin.verify(user.id, body.pin);
+    return this.credit.activate(user.id);
   }
 
   // Checkout paylater: tenor 1/3/6 bulan; PIN wajib (fase kritis #4).

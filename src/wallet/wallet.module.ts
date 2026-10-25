@@ -4,9 +4,10 @@ import { PrismaWalletStore } from './prisma-wallet.store';
 import { WalletController } from './wallet.controller';
 import { PrismaService } from '../common/prisma.service';
 import { QueueModule } from '../queue/queue.module';
+import { RiskModule } from '../risk/risk.module';
 
 @Module({
-  imports: [QueueModule],
+  imports: [QueueModule, RiskModule],
   controllers: [WalletController],
   providers: [PrismaService, PrismaWalletStore, { provide: WALLET_STORE, useClass: PrismaWalletStore }, WalletService],
   exports: [WalletService, { provide: WALLET_STORE, useExisting: PrismaWalletStore }],

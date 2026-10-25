@@ -18,19 +18,18 @@ export class CreditService {
     private readonly wallet: WalletService,
   ) {}
 
-  // Rule-based limit stub: KTP disetujui → limit = 2.5x akumulasi topup
-  // 30 hari terakhir, dibatasi 500rb–20jt.
+  // Rule-based limit stub: KTP disetujui → limit
+  // Fase-2 #7: limit = penghasilan bulanan × 2.5, plafon Rp15jt (T1/T2 10jt/20jt
+  // berlaku untuk SALDO wallet, bukan paylater). LIMIT TIDAK dihitung dari
+  // akumulasi CREDIT ledger, jadi transfer antar akun tak bisa menaikkan limit.
   async computeLimit(userId: string): Promise<number> {
     const kyc = await this.db.kycDocument.findFirst({ where: { userId, kind: 'KTP', status: KycStatus.APPROVED } });
     if (!kyc) throw new DomainError('KYC_NOT_APPROVED', 'KTP belum disetujui admin', 403 as never);
-    const since = new Date(Date.now() - 30 * DAY);
-    const rows = await this.db.ledgerEntry.findMany({
-      where: { account: { userId }, direction: 'CREDIT', amount: { gt: 0 }, createdAt: { gte: since } },
-      select: { amount: true },
-    });
-    const topup30d = rows.reduce((a: number, r) => a + r.amount, 0);
+    const user = await this.db.user.findUnique({ where: { id: userId } });
+    const income = user?.monthlyIncome ?? 0;
+    if (!income) throw new DomainError('NO_INCOME_DATA', 'Penghasilan belum terverifikasi, hubungi admin setelah verify Tier 2');
     const o = opts();
-    const raw = Math.round(topup30d * o.paylaterLimitMultiplier);
+    const raw = Math.round(income * o.paylaterLimitMultiplier);
     return Math.min(o.paylaterLimitMax, Math.max(o.paylaterLimitMin, raw));
   }
 
@@ -82,27 +81,47 @@ export class CreditService {
     }
     const line = await this.ensureLine(userId);
     if (!line.activated) throw new DomainError('PAYLATER_NOT_ACTIVE', 'PayLater belum diaktivasi', 403 as never);
-    if (line.used + amount > line.limitAmount) throw new DomainError('LIMIT_EXCEEDED', 'Limit PayLater tidak mencukupi');
 
     // bunga: tenor 1 (≤30 hari) 0%; 3/6 bulan 1% per bulan
     const totalInterest = Math.round((amount * this.payableInterestPerMonth(tenorMonths) * tenorMonths) / 100);
     const totalAmount = amount + totalInterest;
     const per = Math.round(totalAmount / tenorMonths);
 
-    const payLaterTx = await this.db.$transaction(async (tx: import('@prisma/client').Prisma.TransactionClient): Promise<string> => {
-      const pl = await tx.payLaterTx.create({
-        data: { lineId: line.id, amount, totalAmount, totalInterest, tenorMonths, idempotencyKey },
-      });
-      for (let seq = 1; seq <= tenorMonths; seq++) {
-        const amt = seq === tenorMonths ? totalAmount - per * (tenorMonths - 1) : per;
-        await tx.payLaterInstallment.create({
-          data: { payLaterTxId: pl.id, seq, dueAt: new Date(Date.now() + seq * 30 * DAY), amount: amt },
+    try {
+      const payLaterTx = await this.db.$transaction(async (tx): Promise<string> => {
+        // Fase-2 #7 DTI: cicilan per bulan ≤ 25% penghasilan (gaji).
+        const freshUser = await tx.user.findUniqueOrThrow({ where: { id: userId } });
+        const maxPerInstallment = Math.floor(freshUser.monthlyIncome * 0.25);
+        if (per > maxPerInstallment) {
+          throw new DomainError('DTI_EXCEEDED', `Cicilan per bulan Rp${per.toLocaleString('id-ID')} melebihi 25% penghasilan (maks Rp${maxPerInstallment.toLocaleString('id-ID')})`, 400 as never);
+        }
+        // Guard limit atomik: update sekali kondisional; dua request paralel →
+        // hanya satu yang mengurangi limit, sisanya LIMIT_EXCEEDED (rollback).
+        const upd = await tx.payLaterLine.updateMany({
+          where: { id: line.id, used: { lte: line.limitAmount - amount } },
+          data: { used: { increment: amount } },
         });
+        if (upd.count === 0) throw new DomainError('LIMIT_EXCEEDED', 'Limit PayLater tidak mencukupi');
+        const pl = await tx.payLaterTx.create({
+          data: { lineId: line.id, amount, totalAmount, totalInterest, tenorMonths, idempotencyKey },
+        });
+        for (let seq = 1; seq <= tenorMonths; seq++) {
+          const amt = seq === tenorMonths ? totalAmount - per * (tenorMonths - 1) : per;
+          await tx.payLaterInstallment.create({
+            data: { payLaterTxId: pl.id, seq, dueAt: new Date(Date.now() + seq * 30 * DAY), amount: amt },
+          });
+        }
+        return pl.id;
+      });
+      return { message: `Checkout paylater berhasil, ${tenorMonths}x cicilan dibuat`, data: { payLaterTxId: payLaterTx, totalAmount, totalInterest } };
+    } catch (e: unknown) {
+      // Race idempotency di DB (P2002) → REPLAY bukan 500.
+      if (typeof e === 'object' && e !== null && (e as { code?: string }).code === 'P2002') {
+        const existing = await this.db.payLaterTx.findUnique({ where: { idempotencyKey } });
+        if (existing) return { message: 'Checkout sudah pernah diproses (idempoten)', data: { payLaterTxId: existing.id, replay: true } };
       }
-      await tx.payLaterLine.update({ where: { id: line.id }, data: { used: { increment: amount } } });
-      return pl.id;
-    });
-    return { message: `Checkout paylater berhasil, ${tenorMonths}x cicilan dibuat`, data: { payLaterTxId: payLaterTx, totalAmount, totalInterest } };
+      throw e;
+    }
   }
 
   // Daftar cicilan milik user (untuk halaman paylater).
@@ -129,6 +148,15 @@ export class CreditService {
     await this.recomputePenaltyFor(inst.id);
     const fresh = await this.db.payLaterInstallment.findUniqueOrThrow({ where: { id: installmentId } });
     const total = fresh.amount + fresh.penalty;
+    // Fase-2 #3: claim kondisional — dua bayar paralel → hanya satu yang lolos
+    // (count 0 = sudah dibayar/dobel → 400, bukan dobel-debit).
+    const claimed = await this.db.payLaterInstallment.updateMany({
+      where: { id: installmentId, status: { in: ['UNPAID', 'LATE'] } },
+      data: { status: 'PAID' },
+    });
+    if (claimed.count === 0) {
+      throw new DomainError('INSTALLMENT_ALREADY_PAID', 'Cicilan sudah pernah dibayar', 400 as never);
+    }
     try {
       const res = await this.store.applyTransaction({
         idempotencyKey,
@@ -148,7 +176,14 @@ export class CreditService {
       await this.db.payLaterLine.update({ where: { id: inst.payLaterTx.lineId }, data: { used: { decrement: inst.payLaterTx.amount } } });
       return { message: `Cicilan berhasil dibayar (total ${total.toLocaleString('id-ID')} ${fresh.penalty ? 'termasuk denda' : ''})`, data: { installmentId, total, penalty: fresh.penalty } };
     } catch (e: unknown) {
-      if (e instanceof Error && e.name === 'InsufficientBalanceError') throw new DomainError('INSUFFICIENT_BALANCE', 'Saldo tidak mencukupi untuk cicilan');
+      if (e instanceof Error && e.name === 'InsufficientBalanceError') {
+        // rollback claim: cicilan kembali ke status sebelumnya (tidak stuck PAID).
+        await this.db.payLaterInstallment.update({
+          where: { id: installmentId },
+          data: { status: inst.status, paidAt: null, transactionId: null, penalty: fresh.penalty },
+        });
+        throw new DomainError('INSUFFICIENT_BALANCE', 'Saldo tidak mencukupi untuk cicilan', 400 as never);
+      }
       throw e;
     }
   }

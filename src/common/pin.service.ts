@@ -1,5 +1,5 @@
 import { BadRequestException, ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
-import { createHash } from 'crypto';
+import { hashSecret, verifySecret, needsMigrationToScrypt } from './hash.util';
 import { PrismaService } from './prisma.service';
 import { opts } from './config';
 
@@ -57,11 +57,15 @@ export class PinService {
     }
     const user = await this.db.user.findUnique({ where: { id: userId } });
     if (!user) throw new UnauthorizedException('Sesi tidak valid');
-    const ok = user.pinHash !== null && createHash('sha256').update(String(pin)).digest('hex') === user.pinHash;
-    if (!ok) {
+    const ver = user.pinHash ? verifySecret(String(pin), user.pinHash) : null;
+    if (ver !== true) {
       this.bumpFailed(userId);
       throw new BadRequestException('PIN_SALAH');
     }
     this.clear(userId);
+    // Fase-2 #1: migrate hash legacy SHA-256 -> scrypt saat PIN terverifikasi.
+    if (user.pinHash && needsMigrationToScrypt(user.pinHash)) {
+      await this.db.user.update({ where: { id: user.id }, data: { pinHash: hashSecret(String(pin)) } });
+    }
   }
 }

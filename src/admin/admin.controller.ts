@@ -46,4 +46,27 @@ export class AdminController {
     });
     return { message: `Dokumen diperbarui ke status ${updated.status}`, data: updated };
   }
+
+  // Fase-2 #7: admin set data produk — penghasilan bulanan (limit = x2.5) dan
+  // tier verifikasi (T2 = NPWP/penghasilan/tempat kerja terverifikasi).
+  @Patch('users/:id/limit-info')
+  async setUserLimitInfo(
+    @Param('id') id: string,
+    @Body() body: { monthlyIncome?: number; kycTier?: 'T1' | 'T2' },
+  ) {
+    const patch: { monthlyIncome?: number; kycTier?: string } = {};
+    if (body.monthlyIncome !== undefined) {
+      if (!Number.isInteger(body.monthlyIncome) || body.monthlyIncome <= 0) {
+        throw new DomainError('INCOME_INVALID', 'monthlyIncome harus integer rupiah > 0', 400 as never);
+      }
+      patch.monthlyIncome = body.monthlyIncome;
+    }
+    if (body.kycTier !== undefined) {
+      if (!['T1', 'T2'].includes(body.kycTier)) throw new DomainError('TIER_INVALID', 'kycTier harus T1 atau T2', 400 as never);
+      patch.kycTier = body.kycTier;
+    }
+    if (Object.keys(patch).length === 0) throw new DomainError('NOTHING_TO_UPDATE', 'Tidak ada perubahan', 400 as never);
+    const user = await this.db.user.update({ where: { id }, data: patch });
+    return { message: 'Data limit user diperbarui', data: { id: user.id, monthlyIncome: user.monthlyIncome, kycTier: user.kycTier } };
+  }
 }

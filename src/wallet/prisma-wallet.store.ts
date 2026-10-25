@@ -40,7 +40,32 @@ export class PrismaWalletStore implements WalletStore {
     return acc?.id ?? null;
   }
 
+  private replayOf(t: { id: string; idempotencyKey: string }, entries: { accountId: string; direction: 'DEBIT' | 'CREDIT'; amount: number }[]): AppliedTransaction {
+    return { transactionId: t.id, idempotencyKey: t.idempotencyKey, status: 'SUCCESS', created: false, entries };
+  }
+
   async applyTransaction(op: ApplyTransactionOp): Promise<AppliedTransaction> {
+    try {
+      return await this.doApplyTransaction(op);
+    } catch (e: unknown) {
+      // Fase-2 #3: race idempotency di DB — request paralel dengan key sama
+      // menabrak UNIQUE(idempotencyKey) → REPLAY hasil yang sudah ada, bukan 500.
+      if (typeof e === 'object' && e !== null && (e as { code?: string }).code === 'P2002') {
+        const existing = await this.db.transaction.findUnique({ where: { idempotencyKey: op.idempotencyKey } });
+        if (existing) {
+          const entries = await this.db.ledgerEntry.findMany({ where: { transactionId: existing.id } });
+          return this.replayOf(existing, entries.map((en) => ({
+            accountId: en.accountId,
+            direction: en.direction as 'DEBIT' | 'CREDIT',
+            amount: en.amount,
+          })));
+        }
+      }
+      throw e;
+    }
+  }
+
+  private async doApplyTransaction(op: ApplyTransactionOp): Promise<AppliedTransaction> {
     return this.db.$transaction(
       async (tx: import('@prisma/client').Prisma.TransactionClient): Promise<AppliedTransaction> => {
         const existing = await tx.transaction.findUnique({ where: { idempotencyKey: op.idempotencyKey } });

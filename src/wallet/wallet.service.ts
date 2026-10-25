@@ -5,7 +5,9 @@ import {
   InsufficientBalanceError,
   HistoryFilter,
 } from './wallet.store';
-import { providerMode } from '../common/config';
+import { providerMode, tierCapFor } from '../common/config';
+import { RiskService } from '../risk/risk.module';
+import { PrismaService } from '../common/prisma.service';
 import { QueueService } from '../queue/queue.service';
 
 export const WALLET_STORE = 'WALLET_STORE';
@@ -17,7 +19,27 @@ export class WalletService {
   constructor(
     @Inject(WALLET_STORE) private readonly store: WalletStore,
     private readonly queue: QueueService,
+    private readonly db?: PrismaService, // opsional: test in-memory tanpa DB
+    private readonly risk?: RiskService, // opsional: test unit lama tetap jalan
   ) {}
+
+  // Fase-2 #8: RiskService kini benar-benar dipanggil untuk transfer (>10jt REJECT).
+  private assertRisk(kind: string, amount: number, userId: string): void {
+    if (!this.risk) return;
+    const verdict = this.risk.evaluate(kind, amount, { userId });
+    if (!verdict.approved) throw new DomainError('RISK_BLOCK', verdict.reason, 403 as never);
+  }
+
+  // Fase-2 #7: batas SALDO sesuai tier — topup yang membuat saldo melewati batas ditolak (bounce).
+  private async assertTierCap(userId: string, crediting: number): Promise<void> {
+    if (!this.db) return;
+    const user = await this.db.user.findUnique({ where: { id: userId }, select: { kycTier: true } });
+    const cap = tierCapFor(user?.kycTier ?? 'T1');
+    const current = await this.balance(userId);
+    if (current + crediting > cap) {
+      throw new DomainError('SALDO_TIER_EXCEEDED', `Saldo maksimal ${user?.kycTier ?? 'T1'} adalah Rp${cap.toLocaleString('id-ID')}`);
+    }
+  }
 
   private throwInsufficient(e: unknown): never {
     if (e instanceof InsufficientBalanceError) {
@@ -33,6 +55,7 @@ export class WalletService {
   async topupBki(userId: string, amount: number, idempotencyKey: string) {
     if (amount <= 0 || !Number.isInteger(amount)) throw new BadRequestException('Nominal harus integer rupiah > 0');
     if (!idempotencyKey) throw new BadRequestException('Idempotency-Key wajib diisi');
+    await this.assertTierCap(userId, amount);
     const accountId = await this.accountId(userId);
     const pending = await this.store.createPendingTransaction({
       idempotencyKey,
@@ -79,6 +102,7 @@ export class WalletService {
 
   async transferInternal(userId: string, toUserId: string, amount: number, idempotencyKey: string) {
     if (amount <= 0) throw new BadRequestException('Nominal harus lebih dari 0');
+    this.assertRisk('TRANSFER', amount, userId);
     const from = await this.accountId(userId);
     const to = await this.store.ensureAccount(toUserId);
     try {
@@ -101,6 +125,7 @@ export class WalletService {
 
   async transferBank(userId: string, amount: number, idempotencyKey: string, to: { bankCode: string; accountNumber: string; toUserId?: string }) {
     if (amount <= 0) throw new BadRequestException('Nominal harus lebih dari 0');
+    this.assertRisk('TRANSFER', amount, userId);
     const from = await this.accountId(userId);
     const counterparty = `${to.bankCode}:${to.accountNumber}`;
     const pending = await this.store.createPendingTransaction({

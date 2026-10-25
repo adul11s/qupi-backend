@@ -1,5 +1,5 @@
 import {
-  Body, Controller, ForbiddenException, Get, Param, Post, UnauthorizedException, UseGuards, Req, Query, BadRequestException, NotFoundException,
+  Body, Controller, ForbiddenException, Get, HttpCode, Param, Post, UnauthorizedException, UseGuards, Req, Query, BadRequestException, NotFoundException,
 } from '@nestjs/common';
 import { IdentityService } from './identity.service';
 import { PrismaService } from '../common/prisma.service';
@@ -76,6 +76,14 @@ export class IdentityController {
     return { message: `Selamat datang, ${user.name}`, data: { userId: user.id, sessionToken: token } };
   }
 
+  // Fase-2 #5: logout eksplisit — token direvoke server-side (tidak menunggu idle).
+  @Post('logout')
+  @HttpCode(200)
+  async logout(@Req() req: Request) {
+    await this.sessions.revoke(req.headers['x-session-token'] as string | undefined);
+    return { message: 'Logout berhasil, sesi diakhiri' };
+  }
+
   // Flow refresh token: token baru, token lama dibatalkan.
   @Post('session/refresh')
   async refresh(@Req() req: Request) {
@@ -88,8 +96,13 @@ export class IdentityController {
   // Simulasi jam untuk uji idle 15 menit (mundurkan aktivitas terakhir).
   @Post('session/clock/advance')
   async advance(@Req() req: Request, @Body() body: { minutes: number }) {
-    await this.sessions.advanceClock(req.headers['x-session-token'] as string | undefined, Number(body.minutes));
-    return { message: `Waktu sesi dimundurkan ${body.minutes} menit` };
+    // Fase-2 #6: nilai negatif membuat sesi tak pernah idle; >180 di luar uji.
+    const m = Number(body.minutes);
+    if (!Number.isFinite(m) || m < 0 || m > 180) {
+      throw new BadRequestException('minutes harus 0-180');
+    }
+    await this.sessions.advanceClock(req.headers['x-session-token'] as string | undefined, m);
+    return { message: `Waktu sesi dimundurkan ${m} menit` };
   }
 
   @Post('unlock')

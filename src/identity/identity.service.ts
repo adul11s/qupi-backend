@@ -1,7 +1,11 @@
 import { BadRequestException, ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
-import { createHash, randomInt } from 'crypto';
+import { randomInt } from 'crypto';
 import { DomainError } from '../common/errors';
+import { hashSecret, verifySecret, needsMigrationToScrypt } from '../common/hash.util';
 import { IdentityRepository, OtpRecord, UserRecord } from './identity.repository';
+
+// Fase-2 #2: maksimal 5 percobaan salah per kode OTP — lebih → kode invalid.
+const OTP_VERIFY_MAX_ATTEMPTS = Number(process.env.OTP_VERIFY_MAX_ATTEMPTS ?? 5);
 
 export interface IdentityOptions {
   pinMaxAttempts: number;
@@ -19,14 +23,21 @@ function throwIfStale(otp: OtpRecord, now: () => Date): void {
 
 @Injectable()
 export class IdentityService {
+  // Counter percobaan OTP salah per kode (id OTP) — in-memory, kode berumur pendek.
+  private readonly otpWrong = new Map<string, number>();
+
   constructor(
     private readonly repo: IdentityRepository,
     private readonly o: IdentityOptions,
     private readonly now: () => Date = () => new Date(),
   ) {}
 
-  private hash(v: string): string {
-    return createHash('sha256').update(v).digest('hex');
+  // Hash PIN/OTP kini SCRYPT + salt per-record (fase-2 #1); hashSecret → verifikasi
+  // via verifySecret (legacy SHA-256 masih diterima lalu dimigrasi).
+  private async migrateLegacyPin(userId: string, pin: string, currentHash: string): Promise<void> {
+    if (needsMigrationToScrypt(currentHash)) {
+      await this.repo.updateUser(userId, { pinHash: hashSecret(pin) });
+    }
   }
 
   async register(phone: string, name: string): Promise<UserRecord> {
@@ -60,7 +71,7 @@ export class IdentityService {
     const code = String(randomInt(100000, 999999));
     await this.repo.createOtp({
       userId,
-      codeHash: this.hash(code),
+      codeHash: hashSecret(code),
       purpose,
       expiresAt: new Date(t + this.o.otpTtlMinutes * 60_000),
     });
@@ -71,7 +82,18 @@ export class IdentityService {
     const otp = await this.repo.latestOtp(userId, purpose);
     if (!otp || otp.verifiedAt) throw new DomainError('OTP_INVALID', 'OTP tidak valid atau sudah dipakai');
     if (this.now().getTime() > otp.expiresAt.getTime()) throw new DomainError('OTP_EXPIRED', 'OTP sudah kedaluwarsa');
-    if (this.hash(code) !== otp.codeHash) throw new DomainError('OTP_MISMATCH', 'OTP salah');
+    const ver = verifySecret(code, otp.codeHash);
+    if (ver !== true) {
+      const n = (this.otpWrong.get(otp.id) ?? 0) + 1;
+      this.otpWrong.set(otp.id, n);
+      if (n >= OTP_VERIFY_MAX_ATTEMPTS) {
+        // Fase-2 #2: kode dibunuh setelah >= 5 percobaan salah → permintaan
+        // berikutnya selalu OTP_INVALID walau kode aslinya benar.
+        await this.repo.consumeOtp(otp.id);
+        throw new DomainError('OTP_INVALID', 'OTP salah terlalu banyak, permintaan yang baru');
+      }
+      throw new DomainError('OTP_MISMATCH', 'OTP salah');
+    }
     await this.repo.consumeOtp(otp.id);
     return true;
   }
@@ -88,7 +110,7 @@ export class IdentityService {
       const u = await this.repo.findUserById(userId);
       if (!u?.pinHash) throw new DomainError('PIN_NOT_SET', 'PIN belum pernah diset');
     }
-    await this.repo.updateUser(userId, { pinHash: this.hash(pin) });
+    await this.repo.updateUser(userId, { pinHash: hashSecret(pin) });
   }
 
   // Fase kritis: set PIN wajib bukti OTP terverifikasi (purpose RESET_PIN atau
@@ -111,7 +133,7 @@ export class IdentityService {
       if (!fresh) throw new DomainError('OTP_PROOF_REQUIRED', 'Set PIN wajib verifikasi OTP (LOGIN atau RESET_PIN) dulu');
       throwIfStale(fresh, this.now);
     }
-    await this.repo.updateUser(userId, { pinHash: this.hash(pin) });
+    await this.repo.updateUser(userId, { pinHash: hashSecret(pin) });
   }
 
   async verifyPinAndLogin(userId: string, pin: string): Promise<{ user: UserRecord }> {
@@ -121,7 +143,8 @@ export class IdentityService {
       throw new ForbiddenException('Akun terkunci karena 5x PIN salah. Buka lewat OTP (purpose UNLOCK)');
     }
     if (user.status === 'BLOCKED') throw new ForbiddenException('Akun diblokir');
-    const ok = user.pinHash !== null && this.hash(pin) === user.pinHash;
+    const ver = user.pinHash ? verifySecret(pin, user.pinHash) : null;
+    const ok = ver === true;
     await this.repo.createLoginAttempt({ userId, success: ok, reason: ok ? undefined : 'PIN_SALAH' });
     if (!ok) {
       const failed = user.failedPinAttempts + 1;
@@ -134,6 +157,8 @@ export class IdentityService {
       throw new UnauthorizedException(`PIN salah, sisa ${this.o.pinMaxAttempts - failed} percobaan`);
     }
     await this.repo.updateUser(userId, { failedPinAttempts: 0 });
+    // Fase-2 #1: PIN legacy SHA-256 dimigrasi ke scrypt otomatis saat login sukses.
+    await this.migrateLegacyPin(userId, pin, user.pinHash!);
     return { user };
   }
 

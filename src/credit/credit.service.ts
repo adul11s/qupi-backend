@@ -7,6 +7,7 @@ import { WalletStore } from '../wallet/wallet.store';
 import { KycStatus } from '@prisma/client';
 import { makeFingerprint } from '../common/idempotency';
 import { assertDti } from '../common/dti';
+import { RiskService } from '../risk/risk.module';
 
 const TENORS = [1, 3, 6] as const;
 
@@ -18,6 +19,7 @@ export class CreditService {
     private readonly db: PrismaService,
     @Inject(WALLET_STORE) private readonly store: WalletStore,
     private readonly wallet: WalletService,
+    private readonly risk?: RiskService, // opsional: evaluasi risiko paylater
   ) {}
 
   // Rule-based limit stub: KTP disetujui → limit
@@ -94,6 +96,13 @@ export class CreditService {
     }
     const line = await this.ensureLine(userId);
     if (!line.activated) throw new DomainError('PAYLATER_NOT_ACTIVE', 'PayLater belum diaktivasi', 403 as never);
+    // Fase-5: evaluasi risk di checkout paylater (kind PAYLATER) — rule nominal
+    // per transaksi sudah dihapus (digovern limit + DTI), hook tetap dipasang
+    // supaya aturan velocity/review bisa ditambah via RISK_RULES_JSON tanpa ubah kode.
+    if (this.risk) {
+      const verdict = this.risk.evaluate('PAYLATER', amount, { userId });
+      if (!verdict.approved) throw new DomainError('RISK_BLOCK', verdict.reason, 403 as never);
+    }
 
     // bunga: tenor 1 (≤30 hari) 0%; 3/6 bulan 1% per bulan
     const totalInterest = Math.round((amount * this.payableInterestPerMonth(tenorMonths) * tenorMonths) / 100);

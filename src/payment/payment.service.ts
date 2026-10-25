@@ -7,6 +7,7 @@ import { opts, providerMode } from '../common/config';
 import { QueueService } from '../queue/queue.service';
 import { makeFingerprint } from '../common/idempotency';
 import { assertDti } from '../common/dti';
+import { RiskService } from '../risk/risk.module';
 
 export interface InquiryInfo {
   inquiryId: string;
@@ -30,7 +31,26 @@ export class PaymentService {
     @Inject(WALLET_STORE) private readonly store: WalletStore,
     private readonly wallet: WalletService,
     private readonly queue: QueueService,
+    private readonly risk?: RiskService, // opsional: evaluasi risiko QRIS
   ) {}
+
+  private assertRisk(kind: string, amount: number, userId: string, txCountToday?: number): void {
+    if (!this.risk) return;
+    const verdict = this.risk.evaluate(kind, amount, { userId, txCountToday });
+    if (!verdict.approved) throw new DomainError('RISK_BLOCK', verdict.reason, 403 as never);
+  }
+
+  // Fase-5: evaluasi risiko untuk pembayaran QRIS (BKI-cap 2jt + velocity harian),
+  // sebelum debit mana pun dan sebelum claim PENDING -> PAID.
+  private async assertQrisRisk(userId: string, amount: number): Promise<void> {
+    if (!this.risk) return;
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const txCountToday = await this.db.qrisPayment.count({
+      where: { userId, createdAt: { gte: startOfToday }, status: { in: ['PAID', 'SETTLED'] } },
+    });
+    this.assertRisk('QRIS', amount, userId, txCountToday);
+  }
 
   // QRIS dinamis untuk merchant stub — harus checkout dalam 30 detik.
   async createDynamicQris(userId: string, amount: number) {
@@ -77,6 +97,7 @@ export class PaymentService {
     if (Date.now() > qris.expiresAt.getTime()) {
       throw new DomainError('QRIS_EXPIRED', 'QRIS kedaluwarsa (checkout melebihi 30 detik)');
     }
+    await this.assertQrisRisk(userId, qris.amount);
     if (o.method === 'BALANCE') {
       // Fase-2 #3: claim kondisional PENDING->PAID atomik — bayar dobel → 400
       // QRIS_USED sebelum犹 debit mana pun; gagal debit → claim dibatalkan.

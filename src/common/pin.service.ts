@@ -52,14 +52,17 @@ export class PinService {
   }
 
   async verify(userId: string, pin: string): Promise<void> {
+    // Checklist 3: attempt dicek dan dicatat sinkron (check+bump atomik di satu
+    // tick) supaya percobaan paralel tidak bisa menembus window lock — 8 salah paralel
+    // berarti tepat 5 verifikasi diproses dan 3 sisanya langsung PIN_LOCKED 403.
     if (this.attemptCount(userId) >= opts().pinMaxAttempts) {
       throw new ForbiddenException('Percobaan PIN salah terlalu banyak, coba lagi dalam 1 menit (PIN_LOCKED)');
     }
+    this.bumpFailed(userId);
     const user = await this.db.user.findUnique({ where: { id: userId } });
     if (!user) throw new UnauthorizedException('Sesi tidak valid');
     const ver = user.pinHash ? verifySecret(String(pin), user.pinHash) : null;
     if (ver !== true) {
-      this.bumpFailed(userId);
       throw new BadRequestException('PIN_SALAH');
     }
     this.clear(userId);

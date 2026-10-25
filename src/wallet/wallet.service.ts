@@ -24,7 +24,8 @@ export class WalletService {
     private readonly risk?: RiskService, // opsional: test unit lama tetap jalan
   ) {}
 
-  // Fase-2 #8: RiskService kini benar-benar dipanggil untuk transfer (>10jt REJECT).
+  // Fase-5: RiskService dipanggil untuk transfer — hanya cap safety 2.5 miliar
+  // (keputusan produk: dompet tanpa batas transaksi 10jt, rule sudah dihapus).
   private assertRisk(kind: string, amount: number, userId: string): void {
     if (!this.risk) return;
     const verdict = this.risk.evaluate(kind, amount, { userId });

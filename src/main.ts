@@ -33,7 +33,7 @@ async function bootstrap(): Promise<void> {
   app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: false }));
   app.useGlobalFilters(new DomainErrorFilter());
   app.enableShutdownHooks();
-  const port = Number(process.env.PORT ?? 3000);
+  const port = Number(process.env.PORT ?? 4000);
   await app.listen(port);
   console.log(`qupi-backend berjalan di http://localhost:${port} (HTTPS disimulasikan)`);
 }

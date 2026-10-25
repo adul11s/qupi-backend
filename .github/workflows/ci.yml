@@ -2,9 +2,28 @@ name: CI
 on:
   push: { branches: ["*"] }
   pull_request: { branches: ["*"] }
+
+# Checklist 3: test dijalankan dengan Postgres ASLI (service CI), bukan hanya
+# adapter in-memory. In-memory tetap jadi default di lokal (tanpa Docker).
 jobs:
   ci:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: qupi
+          POSTGRES_PASSWORD: qupi
+          POSTGRES_DB: qupi_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U qupi"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://qupi:qupi@localhost:5432/qupi_test?schema=public
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -12,14 +31,16 @@ jobs:
       - run: npm ci
       - name: prisma validate
         run: npx prisma validate
-        env: { DATABASE_URL: 'postgresql://qupi:qupi@localhost:5432/qupi?schema=public' }
       - name: prisma generate
         run: npx prisma generate
-        env: { DATABASE_URL: 'postgresql://qupi:qupi@localhost:5432/qupi?schema=public' }
       - name: lint
         run: npm run lint
       - name: build
         run: npm run build
-      - name: test
+      - name: prisma db push (schema ke Postgres CI)
+        run: npx prisma db push --skip-generate
+      - name: test (unit in-memory + integrasi Postgres)
         run: npm test
-        env: { DATABASE_URL: 'postgresql://qupi:qupi@localhost:5432/qupi?schema=public' }
+        env:
+          RUN_PG_TESTS: '1'
+          OTP_DEBUG: '1' # e2e integrasi membaca kode OTP dari response (hanya CI)

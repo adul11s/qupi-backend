@@ -96,7 +96,7 @@ RUN_PG_TESTS=1 npm test         # + test Postgres asli (butuh Postgres hidup & s
 
 ## What I would do next for production
 
-1. Buktikan suite Postgres lewat CI hijau (service Postgres sudah terpasang di workflow).
+1. Aktualisasi payment provider nyata (BANK/QRIS vendor) — jalur provider stub sudah diabstraksi.
 2. Queue in-memory → BullMQ + Redis nyata dengan retry & dead-letter.
 3. Integrasi provider pembayaran asli dengan verifikasi webhook HMAC + replay window.
 4. RBAC granular + audit log semua aksi admin.

@@ -24,7 +24,7 @@
 | Replay webhook | HMAC-SHA256 atas raw body (fail-closed secret) + idempotensi ledger | `e2e.pg` HMAC + replay, `chaos.spec` webhook ganda |
 | Idem replay lintas payload | fingerprint binding (userId+kind+amount+counterparty) → 409 IDEM_CONFLICT | `idempotency.spec`, `e2e.pg` |
 | Saldo minus paralel | FOR UPDATE + saldo via ledger; 50 transfer paralel → tepat 20 sukses | `e2e.pg` konkurensi |
-| Ledger dasar termutilasi | Invariant Σdebit == Σkredit per transaksi (+ suspense vault untuk funding eksternal) | `ledger-invariant.spec.ts`, `e2e.pg` invariant |
+| Ledger dasar termutilasi | Invariant Σdebit == Σkredit per transaksi (+ suspense vault funding eksternal & clearing payout (invariant universal)) | `ledger-invariant.spec.ts`, `e2e.pg` invariant |
 | Enumerasi admin | `AdminRoleGuard` (isAdmin), audit log append-only | `e2e.pg` admin matrix, `audit.spec.ts` |
 | Risk bypass | risk.evaluate sebelum debit (QRIS cap 2jt, velocity harian, transfer safety cap) | `risk.rules.spec.ts`, `e2e.pg` RISK_BLOCK |
 | KTP bocor | untracked `uploads/`, riwayat git sudah dibersihkan (filter+force-push), content-type/size guard | setup `git log` + FE client guard |

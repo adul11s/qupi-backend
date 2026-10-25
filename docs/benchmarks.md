@@ -13,9 +13,11 @@
 
 ## Interpretation (honest numbers, no spin)
 
-- **Login cost is intentional.** ~1s per login is the scrypt KDF anti-bruteforce
-  parameter — brute force is 1000× more expensive than balance reads. This is
-  the design trade-off, not a bottleneck.
+- **Login cost is the scrypt KDF anti-bruteforce design**, and it now runs
+  **async off the event loop** (`scrypt` promisified — `src/common/hash.util.ts`):
+  parallel logins no longer queue behind each other, other endpoints stay
+  responsive. The ~1s per attempt itself is deliberate — cheap attempts make
+  brute force viable, an anti-bruteforce root (paired with OTP rate limit + PIN lockout).
 - **Authenticated balance read** (real Postgres + session middleware + ledger
   aggregation) runs at ~3k rps single-instance with p99 = 26ms on modest hardware.
 - **Unauth requests** are rejected in 1ms — guard work is effectively free.

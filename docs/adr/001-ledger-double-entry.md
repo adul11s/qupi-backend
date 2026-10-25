@@ -12,7 +12,7 @@ Semua pergerakan dana dicatat sebagai ledger entries double-entry yang immutable
 
 ## Consequences
 
-- Invariant saldo >= 0 tervalidasi terus-menerus (`test/ledger-invariant.spec.ts`) dan bisa diverifikasi ulang dari ledger.
+- **Invariant universal Σdebit == Σkredit untuk SETIAP transaksi** — termasuk dana masuk/keluar eksternal via akun virtual `external-funding-suspense` (debit saat kredit) dan `external-payout-clearing` (kredit saat debit). Di-cache/diparitasikan di kedua store (Prisma & in-memory); test tanpa pengecualian (`test/ledger-invariant.spec.ts`).
 - Audit trail lengkap — setiap perubahan dana dapat direkonstruksi tanpa log tambahan.
 - Query saldo membutuhkan agregasi; dapat dioptimisasi dengan cache atau saldo snapshot bila menjadi bottleneck.
 - Penghapusan/correction menggunakan ledger entries pembalik, bukan edit.

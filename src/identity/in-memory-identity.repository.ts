@@ -40,7 +40,7 @@ export class InMemoryIdentityRepository implements IdentityRepository {
     this.attempts.push({ ...data, createdAt: new Date() });
   }
   async createOtp(code: { userId: string; codeHash: string; purpose: string; expiresAt: Date }): Promise<OtpRecord> {
-    const o: OtpRecord = { id: this.nid(), createdAt: new Date(), consumedAt: null, ...code };
+    const o: OtpRecord = { id: this.nid(), createdAt: new Date(), verifiedAt: null, ...code };
     this.otps.push(o);
     return o;
   }
@@ -52,11 +52,11 @@ export class InMemoryIdentityRepository implements IdentityRepository {
   }
   async consumeOtp(otpId: string): Promise<void> {
     const o = this.otps.find((x) => x.id === otpId);
-    if (o) o.consumedAt = new Date();
+    if (o) o.verifiedAt = new Date();
   }
   async countOtpInWindow(userId: string, purpose: string, since: Date): Promise<number> {
     return this.otps.filter(
-      (o) => o.userId === userId && o.purpose === purpose && o.createdAt >= since && o.consumedAt === null,
+      (o) => o.userId === userId && o.purpose === purpose && o.createdAt >= since && o.verifiedAt === null,
     ).length;
   }
 }

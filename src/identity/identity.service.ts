@@ -1,12 +1,20 @@
 import { BadRequestException, ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { createHash, randomInt } from 'crypto';
 import { DomainError } from '../common/errors';
-import { IdentityRepository, UserRecord } from './identity.repository';
+import { IdentityRepository, OtpRecord, UserRecord } from './identity.repository';
 
 export interface IdentityOptions {
   pinMaxAttempts: number;
   otpTtlMinutes: number;
   otpMaxPerMinute: number;
+}
+
+// OTP terverifikasi membusuk setelah 5 menit — bukti lama tidak dianggap valid.
+function throwIfStale(otp: OtpRecord, now: () => Date): void {
+  const verifiedAt = otp.verifiedAt as Date | null;
+  if (!verifiedAt) return;
+  const ageMs = now().getTime() - verifiedAt.getTime();
+  if (ageMs > 5 * 60_000) throw new DomainError('OTP_PROOF_STALE', 'Bukti OTP sudah lewat 5 menit, minta OTP baru');
 }
 
 @Injectable()
@@ -46,7 +54,7 @@ export class IdentityService {
       throw new DomainError('OTP_RATE_LIMIT', 'Terlalu banyak permintaan OTP, coba lagi dalam 1 menit');
     }
     const last = await this.repo.latestOtp(userId, purpose);
-    if (last && !last.consumedAt && t < last.expiresAt.getTime()) {
+    if (last && !last.verifiedAt && t < last.expiresAt.getTime()) {
       throw new DomainError('OTP_ACTIVE', 'OTP masih aktif, silakan dipakai atau tunggu kedaluwarsa');
     }
     const code = String(randomInt(100000, 999999));
@@ -61,7 +69,7 @@ export class IdentityService {
 
   async verifyOtp(userId: string, purpose: string, code: string): Promise<boolean> {
     const otp = await this.repo.latestOtp(userId, purpose);
-    if (!otp || otp.consumedAt) throw new DomainError('OTP_INVALID', 'OTP tidak valid atau sudah dipakai');
+    if (!otp || otp.verifiedAt) throw new DomainError('OTP_INVALID', 'OTP tidak valid atau sudah dipakai');
     if (this.now().getTime() > otp.expiresAt.getTime()) throw new DomainError('OTP_EXPIRED', 'OTP sudah kedaluwarsa');
     if (this.hash(code) !== otp.codeHash) throw new DomainError('OTP_MISMATCH', 'OTP salah');
     await this.repo.consumeOtp(otp.id);
@@ -79,6 +87,29 @@ export class IdentityService {
     if (requireExisting) {
       const u = await this.repo.findUserById(userId);
       if (!u?.pinHash) throw new DomainError('PIN_NOT_SET', 'PIN belum pernah diset');
+    }
+    await this.repo.updateUser(userId, { pinHash: this.hash(pin) });
+  }
+
+  // Fase kritis: set PIN wajib bukti OTP terverifikasi (purpose RESET_PIN atau
+  // LOGIN). SET awal (belum punya PIN): RESET_PIN atau LOGIN. RESET (sudah punya
+  // PIN): wajib OTP RESET_PIN baru setelah PIN lama terverifikasi di server.
+  async setPinWithOtpProof(userId: string, pin: string, requireExisting = false): Promise<void> {
+    if (!/^\d{6}$/.test(pin)) throw new DomainError('PIN_FORMAT', 'PIN harus 6 digit angka');
+    const user = await this.repo.findUserById(userId);
+    if (!user) throw new DomainError('USER_NOT_FOUND', 'User tidak ditemukan');
+    if (requireExisting || user.pinHash) {
+      // Reset konteks: OTP RESET_PIN yang TERBARU harus terverifikasi segar (5 menit).
+      const otp = await this.repo.latestOtp(userId, 'RESET_PIN');
+      if (!otp?.verifiedAt) throw new DomainError('OTP_PROOF_REQUIRED', 'Reset PIN wajib verifikasi OTP purpose RESET_PIN dulu');
+      throwIfStale(otp, this.now);
+    } else {
+      // Set awal: bukti OTP LOGIN atau RESET_PIN terverifikasi dalam 5 menit.
+      const login = await this.repo.latestOtp(userId, 'LOGIN');
+      const reset = await this.repo.latestOtp(userId, 'RESET_PIN');
+      const fresh = [login, reset].find((o) => o?.verifiedAt);
+      if (!fresh) throw new DomainError('OTP_PROOF_REQUIRED', 'Set PIN wajib verifikasi OTP (LOGIN atau RESET_PIN) dulu');
+      throwIfStale(fresh, this.now);
     }
     await this.repo.updateUser(userId, { pinHash: this.hash(pin) });
   }

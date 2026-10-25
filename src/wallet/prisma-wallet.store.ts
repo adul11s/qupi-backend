@@ -182,7 +182,7 @@ export class PrismaWalletStore implements WalletStore {
   async getTransactionByTid(transactionId: string) {
     const t = await this.db.transaction.findUnique({
       where: { id: transactionId },
-      select: { id: true, status: true, kind: true, failReason: true, counterparty: true, amount: true },
+      select: { id: true, status: true, kind: true, failReason: true, counterparty: true, amount: true, userId: true },
     });
     return t;
   }

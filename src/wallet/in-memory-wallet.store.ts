@@ -168,7 +168,7 @@ export class InMemoryWalletStore implements WalletStore {
     return { transactionId: txId, idempotencyKey: '', status: 'SUCCESS', created: false, entries };
   }
 
-  async getTransactionByTid(transactionId: string): Promise<{ id: string; status: string; kind: string; failReason?: string | null; counterparty?: string | null } | null> {
+  async getTransactionByTid(transactionId: string): Promise<{ id: string; status: string; kind: string; failReason?: string | null; counterparty?: string | null; userId?: string | null } | null> {
     const item = [...this.transactions.values()].find((t) => t.id === transactionId);
     return item ? { ...item, failReason: null, counterparty: null } : null;
   }

@@ -1,4 +1,4 @@
-import { BadRequestException, Inject, Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Inject, Injectable } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 import { WALLET_STORE, WalletService } from '../wallet/wallet.service';
 import { WalletStore } from '../wallet/wallet.store';
@@ -13,6 +13,11 @@ export interface InquiryInfo {
   customerName: string;
   amount: number;
   adminFee: number;
+}
+
+export interface QrisPayResult {
+  message: string;
+  data: Record<string, unknown>;
 }
 
 // Simulasi provider tagihan internal: mode dari env BILL_MODE/PROVIDER_MODE.
@@ -49,17 +54,68 @@ export class PaymentService {
     return q;
   }
 
-  // Bayar QRIS dari saldo. Setelah proses, settlement dikirim ke queue stub.
-  async payQrisFromBalance(userId: string, qrisId: string, idempotencyKey: string) {
+  // Fase kritis #3 (IDOR): GET qris hanya untuk owner.
+  async getQrisOwned(userId: string, id: string) {
+    const q = await this.getQris(id);
+    if (q.userId !== userId) throw new ForbiddenException('QRIS bukan milik akun ini (FORBIDDEN)');
+    return q;
+  }
+
+  // Fase kritis #6: SATU bayar QRIS — BALANCE dari saldo; PAYLATER single-debit
+  // (pin verifikasi di controller). PAYLATER sinkron dalam satu operasi:
+  // cek limit -> paylaterTx -> cicilan -> tandai QRIS PAID, TIDAK debit saldo.
+  async qrisPay(
+    userId: string,
+    qrisId: string,
+    o: { method: 'BALANCE' | 'PAYLATER'; idempotencyKey: string; tenorMonths?: number },
+  ): Promise<QrisPayResult> {
     const qris = await this.getQris(qrisId);
+    if (qris.userId !== userId) throw new ForbiddenException('QRIS bukan milik akun ini (FORBIDDEN)');
     if (qris.status !== 'PENDING') throw new DomainError('QRIS_USED', 'QRIS sudah dipakai');
     if (Date.now() > qris.expiresAt.getTime()) {
       throw new DomainError('QRIS_EXPIRED', 'QRIS kedaluwarsa (checkout melebihi 30 detik)');
     }
-    const tx = await this.wallet.transferInternal(userId, qris.merchantId, qris.amount, idempotencyKey);
-    await this.db.qrisPayment.update({ where: { id: qrisId }, data: { status: 'PAID' } });
+    if (o.method === 'BALANCE') {
+      const tx = await this.wallet.transferInternal(userId, qris.merchantId, qris.amount, o.idempotencyKey);
+      await this.db.qrisPayment.update({ where: { id: qrisId }, data: { status: 'PAID' } });
+      this.queue.enqueue('settlement', { qrisId });
+      return { message: 'QRIS berhasil dibayar dari saldo', data: { qris, transaction: tx } };
+    }
+
+    // --- PAYLATER: satu blok transaksi atomik ---
+    const tenorMonths = o.tenorMonths ?? 1;
+    if (![1, 3, 6].includes(tenorMonths)) throw new DomainError('TENOR_INVALID', 'Tenor harus 1, 3, atau 6 bulan');
+    const line = await this.db.payLaterLine.findUnique({ where: { userId } });
+    if (!line?.activated) throw new DomainError('PAYLATER_NOT_ACTIVE', 'PayLater belum aktif');
+    if (line.used + qris.amount > line.limitAmount) throw new DomainError('LIMIT_EXCEEDED', 'Limit PayLater tidak mencukupi');
+    const totalInterest = tenorMonths === 1 ? 0 : Math.round((qris.amount * tenorMonths) / 100); // 1% per bulan utk tenor >1
+    const totalAmount = qris.amount + totalInterest;
+    const payLaterTxId = await this.db.$transaction(async (tx: import('@prisma/client').Prisma.TransactionClient): Promise<string> => {
+      const existing = await tx.payLaterTx.findUnique({ where: { idempotencyKey: o.idempotencyKey } });
+      if (existing) return existing.id;
+      const pl = await tx.payLaterTx.create({
+        data: { lineId: line.id, amount: qris.amount, totalAmount, totalInterest, tenorMonths, idempotencyKey: o.idempotencyKey },
+      });
+      const per = Math.round(totalAmount / tenorMonths);
+      for (let seq = 1; seq <= tenorMonths; seq++) {
+        await tx.payLaterInstallment.create({
+          data: {
+            payLaterTxId: pl.id,
+            seq,
+            amount: seq === tenorMonths ? totalAmount - per * (tenorMonths - 1) : per,
+            dueAt: new Date(Date.now() + seq * 30 * 24 * 3600 * 1000),
+          },
+        });
+      }
+      await tx.payLaterLine.update({ where: { id: line.id }, data: { used: { increment: qris.amount } } });
+      await tx.qrisPayment.update({ where: { id: qrisId }, data: { status: 'PAID' } });
+      return pl.id;
+    });
     this.queue.enqueue('settlement', { qrisId });
-    return { message: 'QRIS berhasil dibayar', data: { qris, transaction: tx } };
+    return {
+      message: `QRIS dibayar via PayLater (single debit, ${tenorMonths}x cicilan), saldo TIDAK tersentuh`,
+      data: { qrisId, payLaterTxId, paidWith: 'PAYLATER', totalAmount, totalInterest },
+    };
   }
 
   // Settlement intra: sinkronisasi ledger via queue worker stub (merchant stub).

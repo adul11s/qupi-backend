@@ -41,7 +41,7 @@ export class PrismaIdentityRepository implements IdentityRepository {
     return list[0] ?? null;
   }
   async consumeOtp(otpId: string): Promise<void> {
-    await this.db.otpCode.update({ where: { id: otpId }, data: { consumedAt: new Date() } });
+    await this.db.otpCode.update({ where: { id: otpId }, data: { verifiedAt: new Date() } });
   }
   async countOtpInWindow(userId: string, purpose: string, since: Date): Promise<number> {
     return this.db.otpCode.count({ where: { userId, purpose, createdAt: { gt: since } } });

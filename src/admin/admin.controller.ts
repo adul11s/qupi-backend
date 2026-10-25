@@ -1,12 +1,13 @@
 import { Body, Controller, Get, Param, Patch, Query, UseGuards } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 import { SessionGuard } from '../common/session.guard';
+import { AdminRoleGuard } from '../common/admin-role.guard';
 import { DomainError } from '../common/errors';
 import { KycStatus } from '@prisma/client';
 
 // Admin: daftar dokumen KYC + approve/reject/upload_again dengan alasan.
-// (Simulasi header X-Admin-Key sederhana.)
-@UseGuards(SessionGuard)
+// Fase kritis #2: wajib role admin (isAdmin=true), bukan cukup sesi biasa.
+@UseGuards(SessionGuard, AdminRoleGuard)
 @Controller('admin')
 export class AdminController {
   constructor(private readonly db: PrismaService) {}

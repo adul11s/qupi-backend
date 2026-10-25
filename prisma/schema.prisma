@@ -67,6 +67,7 @@ model User {
   status            UserStatus     @default(ACTIVE)
   pinHash           String?
   failedPinAttempts Int            @default(0)
+  isAdmin           Boolean        @default(false)
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
   otpCodes          OtpCode[]
@@ -84,10 +85,10 @@ model OtpCode {
   codeHash   String
   purpose    String
   expiresAt  DateTime
-  consumedAt DateTime?
+  verifiedAt DateTime?
   createdAt  DateTime  @default(now())
 
-  @@index([userId, createdAt])
+  @@index([userId, purpose, createdAt])
 }
 
 model LoginAttempt {

@@ -18,7 +18,7 @@ export interface OtpRecord {
   purpose: string;
   expiresAt: Date;
   createdAt: Date;
-  consumedAt: Date | null;
+  verifiedAt: Date | null; // diisi saat OTP terverifikasi → bukti utk setPin
 }
 
 export interface IdentityRepository {

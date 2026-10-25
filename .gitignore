@@ -3,3 +3,5 @@ dist
 coverage
 .env
 *.tsbuildinfo
+uploads/*
+!uploads/.gitkeep

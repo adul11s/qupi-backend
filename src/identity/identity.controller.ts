@@ -44,14 +44,24 @@ export class IdentityController {
   @Public()
   @Post('otp/verify')
   async verifyOtp(@Body() body: { userId: string; purpose?: string; code: string }) {
-    const ok = await this.identity.verifyOtp(body.userId, body.purpose ?? 'LOGIN', body.code);
-    return { success: ok, message: 'OTP terverifikasi' };
+    const purpose = body.purpose ?? 'LOGIN';
+    const ok = await this.identity.verifyOtp(body.userId, purpose, body.code);
+    // Onboarding: user baru belum punya PIN (login PIN belum bisa) — OTP sudah
+    // terverifikasi, jadi buat sesi terbatas agar /identity/pin/set bisa dipakai.
+    let sessionToken: string | undefined;
+    if (ok) {
+      const user = await this.db.user.findUnique({ where: { id: body.userId } });
+      if (user && !user.pinHash) sessionToken = await this.sessions.create(user.id);
+    }
+    return { success: ok, message: 'OTP terverifikasi', ...(sessionToken ? { data: { sessionToken } } : {}) };
   }
 
-  @Public()
+  // Fase kritis #1: setPIN TIDAK publik lagi — wajib sesi + bukti OTP terverifikasi
+  // (purpose LOGIN utk set awal, RESET_PIN wajib utk reset PIN user lama).
   @Post('pin/set')
-  async setPin(@Body() body: { userId: string; pin: string }) {
-    await this.identity.setPin(body.userId, body.pin);
+  async setPin(@Req() req: Request, @Body() body: { userId?: string; pin: string }) {
+    const user = reqUser(req);
+    await this.identity.setPinWithOtpProof(user.id, body.pin);
     return { message: 'PIN berhasil disimpan' };
   }
 

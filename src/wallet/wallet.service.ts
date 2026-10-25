@@ -1,4 +1,4 @@
-import { BadRequestException, Inject, Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Inject, Injectable } from '@nestjs/common';
 import { DomainError } from '../common/errors';
 import {
   WalletStore,
@@ -10,6 +10,8 @@ import { QueueService } from '../queue/queue.service';
 
 export const WALLET_STORE = 'WALLET_STORE';
 
+// Fase kritis #7: callback topup harus mengkredit ledger milik user — bukan
+// credits: [] yang membuat saldo user tidak naik.
 @Injectable()
 export class WalletService {
   constructor(
@@ -62,7 +64,16 @@ export class WalletService {
 
   // Callback sandbox BKI: menyudahkan transaksi TAHAN PENDING.
   async topupCallback(transactionId: string, status: 'SUCCESS' | 'FAILED') {
-    await this.store.settleTransaction({ transactionId, status, failReason: status === 'FAILED' ? 'BKI_MENOLAK' : null, credits: [] });
+    const t = await this.store.getTransactionByTid(transactionId);
+    if (!t || !t.userId || typeof t.amount !== "number") throw new DomainError("TX_NOT_FOUND", "Transaksi tidak ditemukan");
+    // kredit ke account milik user (ledger), bukan kosong.
+    await this.store.settleTransaction({
+      transactionId,
+      status,
+      failReason: status === 'FAILED' ? 'BKI_MENOLAK' : null,
+      amount: t.amount,
+      credits: status === 'SUCCESS' && t.userId ? [await this.store.ensureAccount(t.userId)] : [],
+    });
     return { message: `Top up ${status === 'SUCCESS' ? 'berhasil disettle' : 'digagalkan'} via callback sandbox` };
   }
 
@@ -108,33 +119,70 @@ export class WalletService {
       await this.store.settleTransaction({ transactionId: pending.transactionId, status: 'FAILED', failReason: 'BANK_TIDAK_SOLOK_TERIMA', amount });
       return { message: 'Transfer bank gagal di sisi provider sandbox', data: await this.store.getTransactionByTid(pending.transactionId) };
     }
-    const destAccountId = to.toUserId ? await this.store.ensureAccount(to.toUserId) : `BANK-EXTERNAL-${to.bankCode}`;
-    this.queue.enqueue('settlement', { transactionId: pending.transactionId, debits: [{ accountId: from, amount }], credits: [destAccountId] });
+    const destAccountId = to.toUserId ? await this.store.ensureAccount(to.toUserId) : null;
+    // Rekening luar (tanpa toUserId): tidak ada account ledger internal tujuan —
+    // settle tanpa credit (uang keluar ke bank luar), sehingga tidak stuck PENDING.
+    this.queue.enqueue('settlement', {
+      transactionId: pending.transactionId,
+      debits: [{ accountId: from, amount }],
+      credits: destAccountId ? [destAccountId] : [],
+    });
     return { message: 'Transfer bank ikut PENDING, status akan disettle via pekerja/callback', data: await this.store.getTransactionByTid(pending.transactionId) };
   }
 
   async settleFromQueue(payload: { transactionId: string; debits?: { accountId: string; amount: number }[]; credits?: string[] }) {
     const tx = await this.store.getTransactionByTid(payload.transactionId);
     if (!tx || tx.status !== 'PENDING') return { skipped: true };
-    await this.store.settleTransaction({
-      transactionId: payload.transactionId,
-      status: 'SUCCESS',
-      amount: 0,
-      debits: payload.debits ?? [],
-      credits: payload.credits ?? [],
-    });
+    try {
+      await this.store.settleTransaction({
+        transactionId: payload.transactionId,
+        status: 'SUCCESS',
+        amount: tx.amount,
+        debits: payload.debits ?? [],
+        credits: payload.credits ?? [],
+      });
+    } catch (e: unknown) {
+      // Fallback anti-stuck: settle engine gagal (mis. FK account tidak ada) ->
+      // tandai FAILED dari user id di transaction, bukan biarkan PENDING selamanya.
+      await this.store.settleTransaction({
+        transactionId: payload.transactionId,
+        status: 'FAILED',
+        failReason: `SETTLE_ENGINE_GAGAL: ${(e as Error).message}`,
+      });
+      return { failed: payload.transactionId, reason: (e as Error).message };
+    }
     return { settled: payload.transactionId };
   }
 
   async bankTransferCallback(transactionId: string, status: 'SUCCESS' | 'FAILED') {
-    await this.store.settleTransaction({ transactionId, status, failReason: status === 'FAILED' ? 'BANK_MENOLAK' : null });
+    const t = await this.store.getTransactionByTid(transactionId);
+    if (!t || !t.userId || typeof t.amount !== "number") throw new DomainError("TX_NOT_FOUND", "Transaksi tidak ditemukan");
+    try {
+      if (status === 'SUCCESS') {
+        // Settle ulang debits dari user id di transaction supaya uang benar-benar
+        // keluar dari ledger user (fallback:userId dari stack transfer).
+        await this.store.settleTransaction({
+          transactionId,
+          status,
+          amount: t.amount,
+          debits: [{ accountId: await this.store.ensureAccount(t.userId), amount: t.amount }],
+          credits: [],
+        });
+      } else {
+        await this.store.settleTransaction({ transactionId, status, failReason: 'BANK_MENOLAK' });
+      }
+    } catch (e: unknown) {
+      await this.store.settleTransaction({ transactionId, status: 'FAILED', failReason: `BANK_SETTLE_GAGAL: ${(e as Error).message}` });
+      return { message: 'Transfer bank digagalkan (settle engine gagal), tidak stuck' };
+    }
     return { message: `Transfer bank ${status === 'SUCCESS' ? 'sukses' : 'gagal'} via callback sandbox` };
   }
 
+  // Fase kritis #3: status transaksi HANYA untuk owner (userId di tx), sisanya 403.
   async txStatusOf(tid: string, userId: string) {
     const t = await this.store.getTransactionByTid(tid);
     if (!t) throw new DomainError('TX_NOT_FOUND', 'Transaksi tidak ditemukan');
-    void userId;
+    if (t.userId !== userId) throw new ForbiddenException('Transaksi bukan milik akun ini (FORBIDDEN)');
     return t;
   }
 

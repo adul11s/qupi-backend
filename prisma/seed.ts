@@ -14,7 +14,7 @@ const sha = (v: string) => createHash('sha256').update(v).digest('hex');
 async function seedUser(phone: string, name: string, initialBalance: number) {
   const user = await prisma.user.upsert({
     where: { phone },
-    update: {},
+    update: { pinHash: sha('123456'), status: 'ACTIVE', failedPinAttempts: 0 },
     create: { phone, name, pinHash: sha('123456'), status: 'ACTIVE' },
   });
   const wallet = await prisma.walletAccount.upsert({
@@ -95,10 +95,18 @@ async function main() {
   await seedSystemUser('paylater-treasury', 'System: PayLater Treasury');
   await seedSystemUser('bill-provider-treasury', 'System: Bill Provider Treasury');
   await seedSystemUser('MRC-STUB-001', 'Kopi Kuning (merchant stub)');
+
+  // Fase kritis #2: seed user ADMIN (HP 62899000, PIN 123456, isAdmin=true).
+  await prisma.user.upsert({
+    where: { phone: '62899000' },
+    update: { isAdmin: true, pinHash: sha('123456') },
+    create: { phone: '62899000', name: 'Admin QUPI', pinHash: sha('123456'), isAdmin: true, status: 'ACTIVE' },
+  });
+
   const { user: andi } = await seedUser('628123456789', 'Andi', 1_000_000);
   const { user: budi } = await seedUser('628123456790', 'Budi', 500_000);
   await seedPayLater(andi.id);
-  console.log('Seed sukses:', { users: [andi.phone, budi.phone] });
+  console.log('Seed sukses:', { users: [andi.phone, budi.phone], admin: '62899000' });
 }
 
 main().catch((e) => {

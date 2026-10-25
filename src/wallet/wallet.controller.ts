@@ -3,14 +3,20 @@ import { WalletService } from './wallet.service';
 import { Request } from 'express';
 import { KeyPipe, MoneyPipe } from '../common/pipes';
 import { SessionGuard } from '../common/session.guard';
+import { PinService } from '../common/pin.service';
 import { reqUser } from '../common/req-user';
 
 type User = { id: string };
 
+// Fase kritis #4: endpoint transaksi wallet wajib body { pin } (6 digit) —
+// PIN diverifikasi server-side, bukan hanya tampilan modal di frontend.
 @UseGuards(SessionGuard)
 @Controller('wallet')
 export class WalletController {
-  constructor(private readonly wallet: WalletService) {}
+  constructor(
+    private readonly wallet: WalletService,
+    private readonly pin: PinService,
+  ) {}
 
   // Top-up BKI sandbox; Idempotency-Key wajib.
   @Post('topup')
@@ -18,8 +24,12 @@ export class WalletController {
     @Req() req: Request,
     @Body('amount', MoneyPipe) amount: number,
     @Body('idempotencyKey', KeyPipe) idempotencyKey: string,
+    @Body('pin') pin: string,
   ) {
-    return this.wallet.topupBki((reqUser(req) as User).id, amount, idempotencyKey);
+    const user = reqUser(req) as User;
+    this.pin.assertFormat(pin);
+    await this.pin.verify(user.id, pin);
+    return this.wallet.topupBki(user.id, amount, idempotencyKey);
   }
 
   // Status transaksi PENDING (polling sandbox callback).
@@ -43,20 +53,24 @@ export class WalletController {
   @Post('transfer')
   async transfer(
     @Req() req: Request,
-    @Body() body: { toUserId: string; amount: number },
+    @Body() body: { toUserId: string; amount: number; pin: string },
     @Body('idempotencyKey', KeyPipe) idempotencyKey: string,
   ) {
     const user = reqUser(req) as User;
+    this.pin.assertFormat(body.pin);
+    await this.pin.verify(user.id, body.pin);
     return this.wallet.transferInternal(user.id, body.toUserId, Number(body.amount), idempotencyKey);
   }
 
   @Post('transfer/bank')
   async transferBank(
     @Req() req: Request,
-    @Body() body: { bankCode: string; accountNumber: string; toUserId?: string; amount: number },
+    @Body() body: { bankCode: string; accountNumber: string; toUserId?: string; amount: number; pin: string },
     @Body('idempotencyKey', KeyPipe) idempotencyKey: string,
   ) {
     const user = reqUser(req) as User;
+    this.pin.assertFormat(body.pin);
+    await this.pin.verify(user.id, body.pin);
     return this.wallet.transferBank(user.id, Number(body.amount), idempotencyKey, body);
   }
 

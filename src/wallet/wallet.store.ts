@@ -76,6 +76,8 @@ export interface WalletStore {
     kind: string;
     failReason?: string | null;
     counterparty?: string | null;
+    userId?: string | null;
+    amount?: number;
   } | null>;
   getBalanceFromLedger(accountId: string): Promise<number>;
   history(accountId: string, filter: HistoryFilter): Promise<HistoryRow[]>;

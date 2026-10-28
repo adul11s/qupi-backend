@@ -1,8 +1,12 @@
-[![CI](https://github.com/adul11s/qupi-backend/actions/workflows/ci.yml/badge.svg)](https://github.com/adul11s/qupi-backend/actions/workflows/ci.yml)
+[![CI](https://github.com/adul11s/qupi-backend/actions/workflows/ci.yml/badge.svg)](https://github.com/adul11s/qupi-backend/actions/workflows/ci.yml) [![Release](https://img.shields.io/github/v/release/adul11s/qupi-backend?color=0e5347)](https://github.com/adul11s/qupi-backend/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-0e5347.svg)](LICENSE)
 
 # qupi-backend
 
 Backend **QUPI — QUick Payment Instrument** — fintech wallet + paylater — sebagai **monolith modular NestJS 11**.
+
+> **Frontend:** [qupi-apps](https://github.com/adul11s/qupi-apps) — Next.js multi-zone micro-frontend yang memanggil API ini.
+> **Rilis:** [v1.0.0](https://github.com/adul11s/qupi-backend/releases/tag/v1.0.0) · **Lisensi:** MIT
+> **Klaim yang bisa diverifikasi:** 57/57 test invariant ledger hijau · benchmark 2.400 request / 0 error · e2e lawan Postgres + Redis asli di CI.
 
 ## Arsitektur
 
